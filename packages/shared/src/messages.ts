@@ -1,4 +1,4 @@
-import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry } from './session.js';
+import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger } from './session.js';
 
 // Browser -> Server
 export type WsInboundMessage =
@@ -14,10 +14,14 @@ export type WsInboundMessage =
   | { type: 'resume_sessions' }
   | { type: 'set_permission_mode'; sessionId: string; mode: PermissionMode }
   | { type: 'rename_session'; sessionId: string; newName: string }
+  | { type: 'update_cwd'; sessionId: string; cwd: string }
   | { type: 'set_model'; sessionId: string; model: string }
+  | { type: 'set_effort'; sessionId: string; effort: string }
   | { type: 'generate_summary'; sessionId: string }
   | { type: 'permission_response'; sessionId: string; toolUseId: string; decision: 'allow' | 'deny'; message?: string }
+  | { type: 'question_response'; sessionId: string; toolUseId: string; answer: string }
   | { type: 'dequeue_message'; sessionId: string; index: number }
+  | { type: 'cancel_wakeup'; sessionId: string }
   | { type: 'ping' };
 
 // Server -> Browser
@@ -39,9 +43,20 @@ export type WsOutboundMessage =
   | { type: 'permission_mode_change'; sessionId: string; mode: PermissionMode }
   | { type: 'session_renamed'; sessionId: string; newName: string }
   | { type: 'model_changed'; sessionId: string; model: string }
+  | { type: 'effort_changed'; sessionId: string; effort: string | null }
+  | { type: 'cwd_changed'; sessionId: string; cwd: string }
   | { type: 'summary_generated'; sessionId: string; summary: string; summaryGeneratedAt: string }
   | { type: 'permission_request'; sessionId: string; toolUseId: string; toolName: string; input: Record<string, unknown> }
   | { type: 'permission_resolved'; sessionId: string }
   | { type: 'tool_result'; sessionId: string; toolUseId: string; result: ToolResultInfo }
+  | { type: 'pending_question'; sessionId: string; toolUseId: string; question: { question: string; header?: string; options?: { label: string; description?: string }[] } }
+  | { type: 'question_resolved'; sessionId: string; toolUseId: string }
   | { type: 'debug_log'; sessionId: string; entry: DebugLogEntry }
+  | { type: 'wakeup_scheduled'; sessionId: string; wakeup: PendingWakeup }
+  | { type: 'wakeup_cleared'; sessionId: string }
+  | { type: 'triggers_snapshot'; triggers: Trigger[] }
+  | { type: 'trigger_created'; trigger: Trigger }
+  | { type: 'trigger_updated'; trigger: Trigger }
+  | { type: 'trigger_deleted'; triggerId: string }
+  | { type: 'trigger_fired'; trigger: Trigger }
   | { type: 'error'; sessionId: string; message: string };

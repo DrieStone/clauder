@@ -3,7 +3,7 @@ import { createApp } from './server.js';
 import { SessionManager } from './session-manager.js';
 import { setupWebSocket } from './ws.js';
 import { onRateLimitUpdate } from './rate-limits.js';
-import { initAuth } from './auth.js';
+import { TriggerManager } from './triggers.js';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -19,33 +19,57 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
   }
 }
 
-// Initialize auth token (load or generate)
-const authToken = initAuth();
-
 // Create session manager with a placeholder broadcast (wired up in setupWebSocket)
 const sessionManager = new SessionManager(() => {});
 
+// Trigger manager — fires messages to sessions on schedule. Wired up post-WS.
+let triggerManager: TriggerManager;
+
 // Create Express app and HTTP server
-const app = createApp(sessionManager);
+const app = createApp(sessionManager, () => triggerManager);
 const server = http.createServer(app);
 
 // Set up WebSocket on the same server
-const { broadcast } = setupWebSocket(server, sessionManager);
+const { broadcast } = setupWebSocket(server, sessionManager, () => triggerManager);
 
 // Broadcast rate limit updates to all clients
 onRateLimitUpdate((rateLimit) => {
   broadcast({ type: 'rate_limit_update', rateLimit });
 });
 
+// Initialize triggers (fire messages via sessionManager, broadcast events to clients)
+triggerManager = new TriggerManager(
+  (sessionId, message) => {
+    sessionManager.sendMessage(sessionId, message, []).catch((err: any) => {
+      console.error(`[TriggerManager] sendMessage failed for ${sessionId}:`, err.message);
+    });
+  },
+  (event, trigger) => {
+    switch (event) {
+      case 'created': broadcast({ type: 'trigger_created', trigger }); break;
+      case 'updated': broadcast({ type: 'trigger_updated', trigger }); break;
+      case 'deleted': broadcast({ type: 'trigger_deleted', triggerId: trigger.id }); break;
+      case 'fired':   broadcast({ type: 'trigger_fired', trigger }); break;
+    }
+  },
+);
+triggerManager.load();
+
 // Restore sessions from disk now that broadcast is wired
 sessionManager.restoreFromDisk();
 
-// Start listening
-server.listen(PORT, () => {
-  console.log(`[Clauder] Server running on http://localhost:${PORT}`);
-  console.log(`[Clauder] WebSocket available at ws://localhost:${PORT}/ws`);
-  console.log(`[Clauder] Auth token: ${authToken}`);
-  console.log(`[Clauder] Token stored in ~/.clauder/auth-token`);
+// Start listening on all interfaces (0.0.0.0) for Tailscale/remote access
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Clauder] Server running on http://0.0.0.0:${PORT}`);
+  console.log(`[Clauder] WebSocket available at ws://0.0.0.0:${PORT}/ws`);
+});
+
+// Prevent unhandled errors from crashing the server
+process.on('uncaughtException', (err) => {
+  console.error('[Clauder] Uncaught exception (server kept alive):', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Clauder] Unhandled rejection (server kept alive):', reason);
 });
 
 // Graceful shutdown - persist before destroying

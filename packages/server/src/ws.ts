@@ -4,21 +4,15 @@ import type { WsInboundMessage, WsOutboundMessage } from '@clauder/shared';
 import { SessionManager } from './session-manager.js';
 import { discoverSessions } from './discovery.js';
 import { getRateLimitInfo } from './rate-limits.js';
-import { isAuthenticated } from './auth.js';
+import type { TriggerManager } from './triggers.js';
 
-export function setupWebSocket(server: Server, sessionManager: SessionManager) {
+export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager) {
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
 
-  // Handle HTTP upgrade manually so we can check auth
+  // Handle HTTP upgrade for WebSocket connections
   server.on('upgrade', (req, socket, head) => {
     if (req.url !== '/ws') {
-      socket.destroy();
-      return;
-    }
-
-    if (!isAuthenticated(req)) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
@@ -75,10 +69,17 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager) {
       ws.send(JSON.stringify({ type: 'pause_update', pauseUntil }));
     }
 
+    // Send current triggers snapshot
+    try {
+      ws.send(JSON.stringify({ type: 'triggers_snapshot', triggers: getTriggers().list() }));
+    } catch {
+      // TriggerManager may not be initialized yet — skip
+    }
+
     ws.on('message', async (data) => {
       try {
         const msg: WsInboundMessage = JSON.parse(data.toString());
-        await handleMessage(msg, sessionManager, broadcast);
+        await handleMessage(msg, sessionManager, broadcast, getTriggers);
       } catch (err: any) {
         console.error('[WS] Error handling message:', err);
         ws.send(JSON.stringify({
@@ -102,6 +103,7 @@ async function handleMessage(
   msg: WsInboundMessage,
   sessionManager: SessionManager,
   broadcast: (msg: WsOutboundMessage) => void,
+  getTriggers: () => TriggerManager,
 ) {
   switch (msg.type) {
     case 'create_session': {
@@ -161,6 +163,8 @@ async function handleMessage(
     case 'destroy_session': {
       try {
         await sessionManager.destroySession(msg.sessionId);
+        // Also clean up any triggers tied to this session
+        getTriggers().removeSessionTriggers(msg.sessionId);
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
@@ -208,9 +212,27 @@ async function handleMessage(
       break;
     }
 
+    case 'update_cwd': {
+      try {
+        sessionManager.updateCwd(msg.sessionId, msg.cwd);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
     case 'set_model': {
       try {
         sessionManager.setModel(msg.sessionId, msg.model);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'set_effort': {
+      try {
+        sessionManager.setEffort(msg.sessionId, msg.effort || undefined);
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
@@ -231,7 +253,15 @@ async function handleMessage(
 
     case 'permission_response': {
       // No-op in v2: permission mode is a CLI startup flag, not an interactive callback.
-      // The server never sends permission_request events in v2, so this handler is dead code.
+      break;
+    }
+
+    case 'question_response': {
+      try {
+        sessionManager.respondToQuestion(msg.sessionId, msg.toolUseId, msg.answer);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
       break;
     }
 
@@ -242,6 +272,15 @@ async function handleMessage(
 
     case 'resume_sessions': {
       sessionManager.resumeSessions();
+      break;
+    }
+
+    case 'cancel_wakeup': {
+      try {
+        sessionManager.cancelWakeup(msg.sessionId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
       break;
     }
 

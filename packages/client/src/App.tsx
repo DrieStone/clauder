@@ -2,8 +2,8 @@ import { SessionProvider, useSessions } from './context/SessionContext';
 import { Dashboard } from './components/Dashboard';
 import { SessionView } from './components/SessionView';
 import { PauseBar } from './components/PauseBar';
-import { LoginPage } from './components/LoginPage';
-import { useEffect, useCallback, useState, useRef } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
+import { onNotificationClick, markRead } from './lib/notifications';
 
 function AppContent() {
   const { state, setActiveSession } = useSessions();
@@ -37,6 +37,16 @@ function AppContent() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
+  // Wire notification clicks to focus the session
+  useEffect(() => {
+    onNotificationClick((sessionId) => setActiveSession(sessionId));
+  }, [setActiveSession]);
+
+  // Mark notifications as read whenever a session is opened
+  useEffect(() => {
+    if (state.activeSessionId) markRead(state.activeSessionId);
+  }, [state.activeSessionId]);
+
   return (
     <div className="h-screen flex flex-col bg-gray-950 text-gray-100">
       {/* Pause bar */}
@@ -66,27 +76,6 @@ function AppContent() {
 }
 
 export function App() {
-  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'unauthenticated'>('checking');
-
-  useEffect(() => {
-    fetch('/api/auth-check')
-      .then(res => res.json())
-      .then(data => setAuthState(data.authenticated ? 'authenticated' : 'unauthenticated'))
-      .catch(() => setAuthState('unauthenticated'));
-  }, []);
-
-  if (authState === 'checking') {
-    return (
-      <div className="h-screen flex items-center justify-center bg-gray-950">
-        <div className="text-sm text-gray-500">Loading...</div>
-      </div>
-    );
-  }
-
-  if (authState === 'unauthenticated') {
-    return <LoginPage onSuccess={() => setAuthState('authenticated')} />;
-  }
-
   return (
     <SessionProvider>
       <AppContent />

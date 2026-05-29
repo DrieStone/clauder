@@ -26,7 +26,7 @@ export function summarizeToolUse(tool: ToolUseInfo): string {
   }
 }
 
-export function MessageBubble({ message }: { message: UIMessage }) {
+export function MessageBubble({ message, sessionId }: { message: UIMessage; sessionId: string }) {
   if (message.role === 'system') {
     return (
       <div className="text-center text-xs text-gray-500 py-1">
@@ -49,7 +49,7 @@ export function MessageBubble({ message }: { message: UIMessage }) {
         {message.toolUses && message.toolUses.length > 0 && (
           <div className="flex flex-col gap-1 mb-1.5">
             {message.toolUses.map((tool) => (
-              <ToolUseAccordion key={tool.id} tool={tool} />
+              <ToolUseAccordion key={tool.id} tool={tool} sessionId={sessionId} />
             ))}
           </div>
         )}

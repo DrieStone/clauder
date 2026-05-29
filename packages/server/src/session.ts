@@ -1,28 +1,65 @@
 import { v4 as uuid } from 'uuid';
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { homedir } from 'os';
 import type { ChildProcess } from 'child_process';
-import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType } from '@clauder/shared';
+import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
 import { recordCostDelta } from './rate-limits.js';
 
-// Walk up the directory tree from this file to find cli.js — works regardless
-// of npm hoisting level (packages/server/node_modules, packages/node_modules, root node_modules).
+// Walk up the directory tree from this file to find the Claude CLI binary.
+// v2.1.120+ ships a native binary at bin/claude.exe instead of cli.js.
 const CLAUDE_CLI_PATH = (() => {
   let dir = dirname(fileURLToPath(import.meta.url));
+  // Check for native binary first (v2.1.120+), then legacy cli.js
+  const candidates = [
+    'node_modules/@anthropic-ai/claude-code/bin/claude.exe',
+    'node_modules/@anthropic-ai/claude-code/cli.js',
+  ];
   while (true) {
-    const candidate = join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
-    if (existsSync(candidate)) {
-      console.log(`[Clauder] Claude CLI found at: ${candidate}`);
-      return candidate;
+    for (const rel of candidates) {
+      const candidate = join(dir, rel);
+      if (existsSync(candidate)) {
+        console.log(`[Clauder] Claude CLI found at: ${candidate}`);
+        return candidate;
+      }
     }
     const parent = dirname(dir);
-    if (parent === dir) throw new Error('Could not find @anthropic-ai/claude-code/cli.js — is the package installed?');
+    if (parent === dir) throw new Error('Could not find Claude CLI binary — is @anthropic-ai/claude-code installed?');
     dir = parent;
   }
 })();
+
+// Detect whether the CLI is a native binary or a Node.js script
+const CLI_IS_NATIVE = CLAUDE_CLI_PATH.endsWith('.exe');
+
+// Path to the Clauder MCP server (built from packages/mcp-server)
+const CLAUDER_MCP_PATH = (() => {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const candidate = join(dir, 'packages', 'mcp-server', 'dist', 'index.js');
+    if (existsSync(candidate)) {
+      console.log(`[Clauder] MCP server found at: ${candidate}`);
+      return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      console.warn('[Clauder] MCP server not found — controller mode will not work until built');
+      return '';
+    }
+    dir = parent;
+  }
+})();
+
+// Directory for per-session MCP config files
+const MCP_CONFIG_DIR = join(homedir(), '.clauder', 'mcp-configs');
+if (!existsSync(MCP_CONFIG_DIR)) {
+  mkdirSync(MCP_CONFIG_DIR, { recursive: true });
+}
+
+const CLAUDER_PORT = process.env.CLAUDER_PORT || '3001';
 
 /** Max characters for tool result content sent to client */
 const MAX_TOOL_RESULT_LENGTH = 10_000;
@@ -50,6 +87,8 @@ export class ManagedSession {
   queuedMessages: QueuedMessage[] = [];
 
   pendingPermission: PendingPermission | null = null;
+  pendingWakeup: PendingWakeup | null = null;
+  private wakeupTimer: NodeJS.Timeout | null = null;
 
   private activeProcess: ChildProcess | null = null;
   private broadcast: (msg: WsOutboundMessage) => void;
@@ -91,6 +130,7 @@ export class ManagedSession {
       summary?: string | null;
       summaryGeneratedAt?: string | null;
       compactedContext?: string | null;
+      pendingWakeup?: PendingWakeup | null;
       createdAt: string;
       lastActiveAt: string;
     },
@@ -111,6 +151,18 @@ export class ManagedSession {
     session.summary = data.summary ?? null;
     session.summaryGeneratedAt = data.summaryGeneratedAt ?? null;
     session.compactedContext = data.compactedContext ?? null;
+
+    // Restore pending wakeup if not past due
+    if (data.pendingWakeup) {
+      const scheduledMs = new Date(data.pendingWakeup.scheduledAt).getTime();
+      const remainingMs = scheduledMs - Date.now();
+      if (remainingMs > 0) {
+        session.pendingWakeup = data.pendingWakeup;
+        session.wakeupTimer = setTimeout(() => session.fireWakeup(), remainingMs);
+      }
+      // If past due, drop it silently — server was down past the firing time
+    }
+
     // Clauder-native sessions: resume directly (we own the session file)
     // VS Code sessions: they were already forked on first use, so also resume directly
     session.needsFork = false;
@@ -145,6 +197,7 @@ export class ManagedSession {
       queuedMessages: [...this.queuedMessages],
       permissionMode: this.permissionMode,
       pendingPermission: this.pendingPermission,
+      pendingWakeup: this.pendingWakeup,
       summary: this.summary,
       summaryGeneratedAt: this.summaryGeneratedAt,
       compactedContext: this.compactedContext,
@@ -162,6 +215,63 @@ export class ManagedSession {
       sessionId: this.id,
       queue: [...this.queuedMessages],
     });
+  }
+
+  /** Schedule a wakeup from a ScheduleWakeup tool call. Replaces any existing schedule. */
+  private scheduleWakeup(input: any, toolUseId: string): void {
+    this.clearWakeupTimer();
+
+    // Clamp to [60, 3600] to match the ScheduleWakeup tool's documented bounds
+    const rawDelay = Number(input?.delaySeconds) || 60;
+    const delaySeconds = Math.max(60, Math.min(3600, Math.floor(rawDelay)));
+    const scheduledAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
+    const reason = String(input?.reason || '').slice(0, 500);
+    const prompt = String(input?.prompt || '');
+
+    this.pendingWakeup = { scheduledAt, reason, delaySeconds, prompt, toolUseId };
+    this.wakeupTimer = setTimeout(() => this.fireWakeup(), delaySeconds * 1000);
+
+    console.log(`[Session ${this.id}] Wakeup scheduled in ${delaySeconds}s at ${scheduledAt}`);
+    this.broadcast({ type: 'wakeup_scheduled', sessionId: this.id, wakeup: this.pendingWakeup });
+  }
+
+  /** Fire the pending wakeup: send a continuation message to the session. */
+  private fireWakeup(): void {
+    if (!this.pendingWakeup) return;
+    const wakeup = this.pendingWakeup;
+    this.pendingWakeup = null;
+    this.wakeupTimer = null;
+    console.log(`[Session ${this.id}] Wakeup firing (reason: ${wakeup.reason})`);
+
+    // Build a continuation message. If the prompt is the autonomous-loop sentinel,
+    // Claude won't recognize it — send a generic continue with the reason for context.
+    const isSentinel = wakeup.prompt === '<<autonomous-loop-dynamic>>' || wakeup.prompt === '<<autonomous-loop>>';
+    const message = isSentinel
+      ? `[Scheduled wakeup] Continue with the task.${wakeup.reason ? ` Reason: ${wakeup.reason}` : ''}`
+      : wakeup.prompt;
+
+    this.broadcast({ type: 'wakeup_cleared', sessionId: this.id });
+
+    // Send as a normal user message (will be queued if session is currently working)
+    this.sendMessage(message, []).catch(err => {
+      console.error(`[Session ${this.id}] Wakeup send failed: ${err.message}`);
+    });
+  }
+
+  /** Cancel a pending wakeup (user-initiated or new message). */
+  cancelWakeup(): void {
+    if (!this.pendingWakeup) return;
+    this.clearWakeupTimer();
+    this.pendingWakeup = null;
+    console.log(`[Session ${this.id}] Wakeup canceled`);
+    this.broadcast({ type: 'wakeup_cleared', sessionId: this.id });
+  }
+
+  private clearWakeupTimer(): void {
+    if (this.wakeupTimer) {
+      clearTimeout(this.wakeupTimer);
+      this.wakeupTimer = null;
+    }
   }
 
   /** Remove a queued message by index */
@@ -190,12 +300,33 @@ export class ManagedSession {
     });
   }
 
+  setEffort(effort: string | undefined): void {
+    this.config = { ...this.config, effort: (effort || undefined) as any };
+    this.broadcast({
+      type: 'effort_changed',
+      sessionId: this.id,
+      effort: effort || null,
+    });
+  }
+
   rename(newName: string): void {
     this.config = { ...this.config, name: newName };
     this.broadcast({
       type: 'session_renamed',
       sessionId: this.id,
       newName,
+    });
+  }
+
+  setCwd(cwd: string): void {
+    this.config = { ...this.config, cwd };
+    // Clear SDK session ID — the old session was tied to the old project path
+    // and can't be resumed in a different directory
+    this.sdkSessionId = null;
+    this.broadcast({
+      type: 'cwd_changed',
+      sessionId: this.id,
+      cwd,
     });
   }
 
@@ -243,9 +374,12 @@ export class ManagedSession {
     return null;
   }
 
-  private spawnClaudeProcess(extraArgs: string[], stdinPayload: string): ChildProcess {
-    const args = [
-      CLAUDE_CLI_PATH,
+  private spawnClaudeProcess(extraArgs: string[], stdinPayload: string, keepStdinOpen = false): ChildProcess {
+    // Validate cwd exists before spawning — missing cwd causes a misleading ENOENT on the binary
+    if (!existsSync(this.config.cwd)) {
+      throw new Error(`Working directory does not exist: ${this.config.cwd}`);
+    }
+    const cliArgs = [
       '--print',
       '--output-format=stream-json',
       '--input-format=stream-json',
@@ -253,14 +387,36 @@ export class ManagedSession {
       '--verbose',
       ...extraArgs,
     ];
-    console.log(`[Session ${this.id}] Spawning: ${process.execPath} ${args.slice(0, 6).join(' ')} ...`);
-    const proc = spawn(process.execPath, args, {
+    // Native binary (v2.1.120+): run directly. Legacy cli.js: run via node.
+    const command = CLI_IS_NATIVE ? CLAUDE_CLI_PATH : process.execPath;
+    const args = CLI_IS_NATIVE ? cliArgs : [CLAUDE_CLI_PATH, ...cliArgs];
+    console.log(`[Session ${this.id}] Spawning: ${command} ${args.slice(0, 5).join(' ')} ...`);
+    const proc = spawn(command, args, {
       cwd: this.config.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    // Catch spawn errors (e.g. ENOENT) so they don't crash the process
+    proc.on('error', (err) => {
+      console.error(`[Session ${this.id}] Spawn error: ${err.message}`);
+    });
     proc.stdin!.write(stdinPayload + '\n');
-    proc.stdin!.end();
+    if (!keepStdinOpen) proc.stdin!.end();
     return proc;
+  }
+
+  /** Send a tool result back to the active Claude process via stdin (for AskUserQuestion) */
+  respondToQuestion(toolUseId: string, answer: string): void {
+    if (!this.activeProcess?.stdin?.writable) {
+      console.warn(`[Session ${this.id}] Cannot respond to question — no active writable process`);
+      return;
+    }
+    const payload = JSON.stringify({
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      result: answer,
+    });
+    console.log(`[Session ${this.id}] Sending question response for ${toolUseId}: ${answer.slice(0, 80)}`);
+    this.activeProcess.stdin.write(payload + '\n');
   }
 
   private async *readNdjson(proc: ChildProcess): AsyncGenerator<unknown> {
@@ -278,6 +434,12 @@ export class ManagedSession {
         // skip non-JSON lines (e.g. npm warnings)
       }
     };
+
+    // Handle spawn errors (e.g. ENOENT) — mark stream as done so the generator exits
+    proc.on('error', () => {
+      done = true;
+      if (resolveNext) { resolveNext(); resolveNext = null; }
+    });
 
     let partial = '';
     proc.stdout!.on('data', (chunk: Buffer) => {
@@ -384,6 +546,11 @@ export class ManagedSession {
       return;
     }
 
+    // Any new user input cancels a pending wakeup — Claude has fresh input now
+    if (this.pendingWakeup) {
+      this.cancelWakeup();
+    }
+
     // Add user message to history
     const userMsgId = uuid();
     const userMsg: UIMessage = {
@@ -434,9 +601,52 @@ export class ManagedSession {
         flags.push('--model', this.config.model);
       }
 
+      if (this.config.effort) {
+        flags.push('--effort', this.config.effort);
+      }
+
+      // Controller mode: load the Clauder MCP server so this session can orchestrate others
+      if (this.config.controllerMode && CLAUDER_MCP_PATH) {
+        const mcpConfigPath = join(MCP_CONFIG_DIR, `${this.id}.json`);
+        const mcpConfig = {
+          mcpServers: {
+            clauder: {
+              command: process.execPath,
+              args: [CLAUDER_MCP_PATH],
+              env: {
+                CLAUDER_URL: `http://localhost:${CLAUDER_PORT}`,
+                CLAUDER_CONTROLLER_ID: this.id,
+              },
+            },
+          },
+        };
+        writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2));
+        flags.push('--mcp-config', mcpConfigPath);
+      }
+
       const systemParts: string[] = [
         'When running Bash commands that involve SSH, SCP, network requests, package installs (apt-get, pip, npm), or builds, always set the timeout parameter to at least 300000 (5 minutes). The default 2-minute timeout is too short for these operations.',
       ];
+
+      if (this.config.controllerMode) {
+        systemParts.push(
+          'You are the **controller** in a multi-session Clauder setup. Other Claude sessions ("workers") run in parallel; you orchestrate them via the `clauder` MCP tools.\n\n' +
+          '**Worker control:**\n' +
+          '- `list_sessions()` — see all available workers and status\n' +
+          '- `send_message(sessionId, message)` — dispatch (returns immediately)\n' +
+          '- `wait_until_idle(sessionId, timeoutSec)` — block until worker finishes its turn\n' +
+          '- `get_recent_messages(sessionId, count)` — read what a worker did\n' +
+          '- `get_session_status(sessionId)` — quick status check\n\n' +
+          '**Self-managed watches (for long-running monitoring):**\n' +
+          '- `add_watch(description, intervalSeconds, message)` — set up a recurring self-check-in. Every interval, the Clauder server will send the given message to you as if the user typed it.\n' +
+          '- `list_watches()` — see your active watches\n' +
+          '- `remove_watch(watchId)` — stop a watch (do this when monitoring is no longer needed)\n' +
+          '- `update_watch(watchId, ...)` — adjust interval/message\n\n' +
+          '**Overnight workflow:** dispatch tasks to workers with `send_message`, then add a watch like `add_watch("Check on project X", 1200, "Check on the project X worker. If idle, review its recent messages and decide next steps.")`. When that fires, investigate, possibly dispatch more work or remove the watch when done.\n\n' +
+          '**Cost discipline:** Be focused. Don\'t add redundant watches. Remove watches the moment work completes. If a worker errors, read its messages before retrying.'
+        );
+      }
+
       if (this.config.systemPrompt) {
         systemParts.push(this.config.systemPrompt);
       }
@@ -512,7 +722,7 @@ export class ManagedSession {
         });
       }
 
-      this.activeProcess = this.spawnClaudeProcess(flags, stdinPayload);
+      this.activeProcess = this.spawnClaudeProcess(flags, stdinPayload, true); // keep stdin open for AskUserQuestion
 
       let currentAssistantMsgId: string | null = null;
 
@@ -643,6 +853,34 @@ export class ManagedSession {
               });
             }
 
+            // Detect ScheduleWakeup tool uses — set up a server-side timer to auto-resume
+            for (const tu of toolUses) {
+              if (tu.name === 'ScheduleWakeup') {
+                this.scheduleWakeup(tu.input, tu.id);
+              }
+            }
+
+            // Detect AskUserQuestion tool uses — broadcast interactive question to client
+            for (const tu of toolUses) {
+              if (tu.name === 'AskUserQuestion') {
+                const questions = (tu.input as any)?.questions;
+                if (Array.isArray(questions) && questions.length > 0) {
+                  const q = questions[0]; // Show first question
+                  this.broadcast({
+                    type: 'pending_question',
+                    sessionId: this.id,
+                    toolUseId: tu.id,
+                    question: {
+                      question: q.question || '',
+                      header: q.header,
+                      options: q.options,
+                    },
+                  });
+                  console.log(`[Session ${this.id}] AskUserQuestion detected: ${q.question?.slice(0, 80)}`);
+                }
+              }
+            }
+
             // Reset for next turn so a new assistant message gets a fresh ID
             // rather than replacing this one.
             currentAssistantMsgId = null;
@@ -726,13 +964,24 @@ export class ManagedSession {
             this.lastActiveAt = new Date().toISOString();
             const success = resultMsg.subtype === 'success';
             if (!success) {
-              const errorText = resultMsg.result || 'Unknown error';
+              const errorText = resultMsg.result
+                || (Array.isArray(resultMsg.errors) ? resultMsg.errors.join('; ') : '')
+                || 'Unknown error';
               // Auto-recover on 413 request too large: reset SDK session and
               // re-send the last user message (it will be primed with compacted context)
-              if (/request_too_large|413/.test(errorText) && this.sdkSessionId) {
+              if (/request_too_large|413|prompt is too long/i.test(errorText) && this.sdkSessionId) {
                 console.log(`[Session ${this.id}] Request too large (from result) — auto-recovering`);
                 this.autoRecoverFrom413();
                 // Don't set error — we're auto-recovering
+              } else if (/No conversation found/.test(errorText) && this.sdkSessionId) {
+                // Stale SDK session ID (e.g. from v1 migration) — clear it so next message starts fresh
+                console.log(`[Session ${this.id}] SDK session not found — clearing stale ID ${this.sdkSessionId}`);
+                this.sdkSessionId = null;
+                this.needsFork = false;
+                this.error = 'Session data not found (likely from migration). Send another message to start fresh.';
+              } else if (/authentication_error|OAuth token has expired|401/.test(errorText)) {
+                console.log(`[Session ${this.id}] Auth error — OAuth token expired`);
+                this.error = 'AUTH_EXPIRED';
               } else {
                 this.error = errorText;
               }
@@ -778,6 +1027,9 @@ export class ManagedSession {
               success,
               error: !success ? this.error || undefined : undefined,
             });
+
+            // Close stdin so the process exits (we kept it open for AskUserQuestion support)
+            try { this.activeProcess?.stdin?.end(); } catch {}
             break;
           }
         }
@@ -799,9 +1051,22 @@ export class ManagedSession {
       const lastMsgContent = this.messages.length > 0
         ? this.messages[this.messages.length - 1].content
         : '';
-      const has413InMessages = typeof lastMsgContent === 'string' && /request_too_large|413/.test(lastMsgContent);
+      const has413InMessages = typeof lastMsgContent === 'string' && /request_too_large|413|prompt is too long/i.test(lastMsgContent);
 
-      if ((has413InMessages || /request_too_large|413/.test(errMsg)) && this.sdkSessionId) {
+      // Check for auth errors in stderr/messages
+      const lastDebugEntries = this.debugLog.slice(-5).map(e => e.content).join(' ');
+      const hasAuthError = /authentication_error|OAuth token has expired/.test(lastDebugEntries)
+        || /authentication_error|OAuth token has expired/.test(errMsg);
+      if (hasAuthError) {
+        console.log(`[Session ${this.id}] Auth error — OAuth token expired`);
+        this.status = 'error';
+        this.error = 'AUTH_EXPIRED';
+        this.currentToolActivity = null;
+        this.broadcast({ type: 'state_change', sessionId: this.id, status: 'error', error: this.error });
+        return;
+      }
+
+      if ((has413InMessages || /request_too_large|413|prompt is too long/i.test(errMsg)) && this.sdkSessionId) {
         console.log(`[Session ${this.id}] Request too large (from crash) — auto-recovering`);
         this.autoRecoverFrom413();
         return;
@@ -819,7 +1084,7 @@ export class ManagedSession {
 
       // 413 request_too_large: SDK session file is too bloated to resume.
       // Auto-reset the SDK session so the next message starts fresh.
-      const isRequestTooLarge = /request_too_large|413/.test(errMsg);
+      const isRequestTooLarge = /request_too_large|413|prompt is too long/i.test(errMsg);
       if (isRequestTooLarge && this.sdkSessionId) {
         console.log(`[Session ${this.id}] Request too large — abandoning SDK session ${this.sdkSessionId} to start fresh`);
         this.reset();
@@ -896,6 +1161,8 @@ export class ManagedSession {
       });
     } finally {
       if (stallTimer) clearTimeout(stallTimer);
+      // Close stdin if still open (from keepStdinOpen for AskUserQuestion support)
+      try { this.activeProcess?.stdin?.end(); } catch {}
       this.activeProcess = null;
     }
 
@@ -970,6 +1237,7 @@ export class ManagedSession {
   }
 
   async interrupt(): Promise<void> {
+    this.cancelWakeup();
     if (this.activeProcess) {
       this.activeProcess.kill('SIGINT');
     }
@@ -977,6 +1245,8 @@ export class ManagedSession {
 
   async destroy(): Promise<void> {
     this.pendingPermission = null;
+    this.clearWakeupTimer();
+    this.pendingWakeup = null;
 
     if (this.activeProcess) {
       this.activeProcess.kill('SIGINT');

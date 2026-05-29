@@ -1,8 +1,16 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger } from '@clauder/shared';
 import { WsClient } from '../lib/ws-client';
+import { notify } from '../lib/notifications';
 
 // State
+export interface PendingQuestionInfo {
+  toolUseId: string;
+  question: string;
+  header?: string;
+  options?: { label: string; description?: string }[];
+}
+
 interface AppState {
   sessions: Map<string, SessionState>;
   activeSessionId: string | null;
@@ -12,6 +20,10 @@ interface AppState {
   discoveryLoading: boolean;
   rateLimit: RateLimitInfo | null;
   pauseUntil: string | null;
+  /** Pending AskUserQuestion per session: sessionId -> question info */
+  pendingQuestions: Map<string, PendingQuestionInfo>;
+  /** All triggers (watches + scheduled), keyed by trigger id */
+  triggers: Map<string, Trigger>;
 }
 
 // Actions
@@ -32,11 +44,22 @@ type Action =
   | { type: 'PERMISSION_MODE_CHANGE'; sessionId: string; mode: PermissionMode }
   | { type: 'SESSION_RENAMED'; sessionId: string; newName: string }
   | { type: 'MODEL_CHANGED'; sessionId: string; model: string }
+  | { type: 'EFFORT_CHANGED'; sessionId: string; effort: string | null }
+  | { type: 'CWD_CHANGED'; sessionId: string; cwd: string }
   | { type: 'SUMMARY_GENERATED'; sessionId: string; summary: string; summaryGeneratedAt: string }
   | { type: 'PERMISSION_REQUEST'; sessionId: string; toolUseId: string; toolName: string; input: Record<string, unknown> }
   | { type: 'PERMISSION_RESOLVED'; sessionId: string }
+  | { type: 'PENDING_QUESTION'; sessionId: string; toolUseId: string; question: { question: string; header?: string; options?: { label: string; description?: string }[] } }
+  | { type: 'QUESTION_RESOLVED'; sessionId: string; toolUseId: string }
   | { type: 'TOOL_RESULT'; sessionId: string; toolUseId: string; result: ToolResultInfo }
   | { type: 'DEBUG_LOG'; sessionId: string; entry: DebugLogEntry }
+  | { type: 'WAKEUP_SCHEDULED'; sessionId: string; wakeup: PendingWakeup }
+  | { type: 'WAKEUP_CLEARED'; sessionId: string }
+  | { type: 'TRIGGERS_SNAPSHOT'; triggers: Trigger[] }
+  | { type: 'TRIGGER_CREATED'; trigger: Trigger }
+  | { type: 'TRIGGER_UPDATED'; trigger: Trigger }
+  | { type: 'TRIGGER_DELETED'; triggerId: string }
+  | { type: 'TRIGGER_FIRED'; trigger: Trigger }
   | { type: 'UPDATE_LAST_ACTIVE'; sessionId: string }
   | { type: 'ERROR'; sessionId: string; message: string }
   | { type: 'SET_ACTIVE_SESSION'; sessionId: string | null }
@@ -238,6 +261,26 @@ function reducer(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'EFFORT_CHANGED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          config: { ...s.config, effort: (action.effort || undefined) as any },
+        })),
+      };
+    }
+
+    case 'CWD_CHANGED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          config: { ...s.config, cwd: action.cwd },
+        })),
+      };
+    }
+
     case 'SUMMARY_GENERATED': {
       return {
         ...state,
@@ -269,6 +312,23 @@ function reducer(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'PENDING_QUESTION': {
+      const pq = new Map(state.pendingQuestions);
+      pq.set(action.sessionId, {
+        toolUseId: action.toolUseId,
+        question: action.question.question,
+        header: action.question.header,
+        options: action.question.options,
+      });
+      return { ...state, pendingQuestions: pq };
+    }
+
+    case 'QUESTION_RESOLVED': {
+      const pq = new Map(state.pendingQuestions);
+      pq.delete(action.sessionId);
+      return { ...state, pendingQuestions: pq };
+    }
+
     case 'TOOL_RESULT': {
       return {
         ...state,
@@ -295,6 +355,46 @@ function reducer(state: AppState, action: Action): AppState {
           return { ...s, debugLog };
         }),
       };
+    }
+
+    case 'WAKEUP_SCHEDULED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          pendingWakeup: action.wakeup,
+        })),
+      };
+    }
+
+    case 'WAKEUP_CLEARED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          pendingWakeup: null,
+        })),
+      };
+    }
+
+    case 'TRIGGERS_SNAPSHOT': {
+      const triggers = new Map<string, Trigger>();
+      for (const t of action.triggers) triggers.set(t.id, t);
+      return { ...state, triggers };
+    }
+
+    case 'TRIGGER_CREATED':
+    case 'TRIGGER_UPDATED':
+    case 'TRIGGER_FIRED': {
+      const triggers = new Map(state.triggers);
+      triggers.set(action.trigger.id, action.trigger);
+      return { ...state, triggers };
+    }
+
+    case 'TRIGGER_DELETED': {
+      const triggers = new Map(state.triggers);
+      triggers.delete(action.triggerId);
+      return { ...state, triggers };
     }
 
     case 'UPDATE_LAST_ACTIVE': {
@@ -355,10 +455,14 @@ interface SessionContextValue {
   updateLastActive: (sessionId: string) => void;
   setPermissionMode: (sessionId: string, mode: PermissionMode) => void;
   renameSession: (sessionId: string, newName: string) => void;
+  updateCwd: (sessionId: string, cwd: string) => void;
   setModel: (sessionId: string, model: string) => void;
+  setEffort: (sessionId: string, effort: string) => void;
   generateSummary: (sessionId: string) => void;
   respondToPermission: (sessionId: string, toolUseId: string, decision: 'allow' | 'deny', message?: string) => void;
+  respondToQuestion: (sessionId: string, toolUseId: string, answer: string) => void;
   dequeueMessage: (sessionId: string, index: number) => void;
+  cancelWakeup: (sessionId: string) => void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -373,9 +477,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     discoveryLoading: false,
     rateLimit: null,
     pauseUntil: null,
+    pendingQuestions: new Map(),
+    triggers: new Map(),
   });
 
   const wsRef = useRef<WsClient | null>(null);
+
+  // Keep latest state accessible from the WS handler without retriggering useCallback
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
+  // Track previous status per session so we only notify on transitions into error
+  const prevStatusRef = useRef<Map<string, string>>(new Map());
+
+  const sessionName = (sessionId: string): string => {
+    return stateRef.current.sessions.get(sessionId)?.config.name || 'Session';
+  };
 
   const handleWsMessage = useCallback((msg: WsOutboundMessage) => {
     switch (msg.type) {
@@ -388,9 +505,24 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       case 'session_destroyed':
         dispatch({ type: 'SESSION_DESTROYED', sessionId: msg.sessionId });
         break;
-      case 'state_change':
+      case 'state_change': {
+        const prev = prevStatusRef.current.get(msg.sessionId);
+        prevStatusRef.current.set(msg.sessionId, msg.status);
         dispatch({ type: 'STATE_CHANGE', sessionId: msg.sessionId, status: msg.status, error: msg.error });
+        // Notify on entering error state (not for repeated 'error' broadcasts)
+        if (msg.status === 'error' && prev !== 'error') {
+          const errText = msg.error === 'AUTH_EXPIRED'
+            ? 'Claude authentication expired'
+            : msg.error || 'Session errored';
+          notify({
+            title: `❗ ${sessionName(msg.sessionId)}`,
+            body: errText,
+            sessionId: msg.sessionId,
+            tag: `error-${msg.sessionId}`,
+          });
+        }
         break;
+      }
       case 'user_message_echo':
         dispatch({ type: 'USER_MESSAGE_ECHO', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, images: msg.images });
         break;
@@ -427,20 +559,67 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       case 'model_changed':
         dispatch({ type: 'MODEL_CHANGED', sessionId: msg.sessionId, model: msg.model });
         break;
+      case 'effort_changed':
+        dispatch({ type: 'EFFORT_CHANGED', sessionId: msg.sessionId, effort: msg.effort });
+        break;
+      case 'cwd_changed':
+        dispatch({ type: 'CWD_CHANGED', sessionId: msg.sessionId, cwd: msg.cwd });
+        break;
       case 'summary_generated':
         dispatch({ type: 'SUMMARY_GENERATED', sessionId: msg.sessionId, summary: msg.summary, summaryGeneratedAt: msg.summaryGeneratedAt });
         break;
       case 'permission_request':
         dispatch({ type: 'PERMISSION_REQUEST', sessionId: msg.sessionId, toolUseId: msg.toolUseId, toolName: msg.toolName, input: msg.input });
+        notify({
+          title: `🔐 ${sessionName(msg.sessionId)}`,
+          body: `Permission requested: ${msg.toolName}`,
+          sessionId: msg.sessionId,
+          tag: `perm-${msg.sessionId}`,
+        });
         break;
       case 'permission_resolved':
         dispatch({ type: 'PERMISSION_RESOLVED', sessionId: msg.sessionId });
         break;
       case 'tool_result':
         dispatch({ type: 'TOOL_RESULT', sessionId: msg.sessionId, toolUseId: msg.toolUseId, result: msg.result });
+        // If this tool result resolves a pending question, clear it
+        dispatch({ type: 'QUESTION_RESOLVED', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
+        break;
+      case 'pending_question':
+        dispatch({ type: 'PENDING_QUESTION', sessionId: msg.sessionId, toolUseId: msg.toolUseId, question: msg.question });
+        notify({
+          title: `❓ ${sessionName(msg.sessionId)}`,
+          body: msg.question.question || 'Claude is asking a question',
+          sessionId: msg.sessionId,
+          tag: `question-${msg.sessionId}`,
+        });
+        break;
+      case 'question_resolved':
+        dispatch({ type: 'QUESTION_RESOLVED', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
         break;
       case 'debug_log':
         dispatch({ type: 'DEBUG_LOG', sessionId: msg.sessionId, entry: msg.entry });
+        break;
+      case 'wakeup_scheduled':
+        dispatch({ type: 'WAKEUP_SCHEDULED', sessionId: msg.sessionId, wakeup: msg.wakeup });
+        break;
+      case 'wakeup_cleared':
+        dispatch({ type: 'WAKEUP_CLEARED', sessionId: msg.sessionId });
+        break;
+      case 'triggers_snapshot':
+        dispatch({ type: 'TRIGGERS_SNAPSHOT', triggers: msg.triggers });
+        break;
+      case 'trigger_created':
+        dispatch({ type: 'TRIGGER_CREATED', trigger: msg.trigger });
+        break;
+      case 'trigger_updated':
+        dispatch({ type: 'TRIGGER_UPDATED', trigger: msg.trigger });
+        break;
+      case 'trigger_deleted':
+        dispatch({ type: 'TRIGGER_DELETED', triggerId: msg.triggerId });
+        break;
+      case 'trigger_fired':
+        dispatch({ type: 'TRIGGER_FIRED', trigger: msg.trigger });
         break;
       case 'discovered_sessions':
         dispatch({ type: 'DISCOVERED_SESSIONS', sessions: msg.sessions });
@@ -525,8 +704,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'rename_session', sessionId, newName });
   }, []);
 
+  const updateCwdFn = useCallback((sessionId: string, cwd: string) => {
+    wsRef.current?.send({ type: 'update_cwd', sessionId, cwd });
+  }, []);
+
   const setModelFn = useCallback((sessionId: string, model: string) => {
     wsRef.current?.send({ type: 'set_model', sessionId, model });
+  }, []);
+
+  const setEffortFn = useCallback((sessionId: string, effort: string) => {
+    wsRef.current?.send({ type: 'set_effort', sessionId, effort });
   }, []);
 
   const generateSummaryFn = useCallback((sessionId: string) => {
@@ -537,8 +724,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'permission_response', sessionId, toolUseId, decision, message });
   }, []);
 
+  const respondToQuestionFn = useCallback((sessionId: string, toolUseId: string, answer: string) => {
+    wsRef.current?.send({ type: 'question_response', sessionId, toolUseId, answer });
+    dispatch({ type: 'QUESTION_RESOLVED', sessionId, toolUseId });
+  }, []);
+
   const dequeueMessageFn = useCallback((sessionId: string, index: number) => {
     wsRef.current?.send({ type: 'dequeue_message', sessionId, index });
+  }, []);
+
+  const cancelWakeupFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'cancel_wakeup', sessionId });
   }, []);
 
   return (
@@ -559,10 +755,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       updateLastActive,
       setPermissionMode: setPermissionModeFn,
       renameSession: renameSessionFn,
+      updateCwd: updateCwdFn,
       setModel: setModelFn,
+      setEffort: setEffortFn,
       generateSummary: generateSummaryFn,
       respondToPermission: respondToPermissionFn,
+      respondToQuestion: respondToQuestionFn,
       dequeueMessage: dequeueMessageFn,
+      cancelWakeup: cancelWakeupFn,
     }}>
       {children}
     </SessionContext.Provider>

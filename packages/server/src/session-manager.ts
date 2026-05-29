@@ -166,6 +166,12 @@ export class SessionManager {
     // The server never sends permission_request events, so this is never called in practice.
   }
 
+  respondToQuestion(sessionId: string, toolUseId: string, answer: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.respondToQuestion(toolUseId, answer);
+  }
+
   renameSession(sessionId: string, newName: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -173,10 +179,31 @@ export class SessionManager {
     this.persist();
   }
 
+  updateCwd(sessionId: string, cwd: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setCwd(cwd);
+    this.persist();
+  }
+
   setModel(sessionId: string, model: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
     session.setModel(model);
+    this.persist();
+  }
+
+  setEffort(sessionId: string, effort: string | undefined): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setEffort(effort);
+    this.persist();
+  }
+
+  cancelWakeup(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.cancelWakeup();
     this.persist();
   }
 
@@ -211,6 +238,8 @@ export class SessionManager {
 
     // If already past 4 hours and no summary, generate immediately (with a small delay to not block startup)
     // If has a summary already, still schedule for next update
+    // Stagger startup summaries: each session gets an extra 15s offset to avoid spawning many processes at once
+    const staggerOffset = delay < 1000 ? (this.summaryTimers.size * 15_000 + 10_000) : 0;
     const timer = setTimeout(() => {
       this.summaryTimers.delete(sessionId);
       // Only generate if the session hasn't been active since we scheduled
@@ -223,7 +252,7 @@ export class SessionManager {
           console.error(`[SessionManager] Summary generation failed for ${sessionId}:`, err);
         });
       }
-    }, delay < 1000 ? 5000 : delay); // Min 5s delay to not block startup
+    }, delay < 1000 ? staggerOffset : delay);
 
     this.summaryTimers.set(sessionId, timer);
   }

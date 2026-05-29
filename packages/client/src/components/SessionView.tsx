@@ -8,6 +8,9 @@ import { PermissionModeSelector } from './PermissionModeSelector';
 import { FileBrowser } from './FileBrowser';
 import { DebugLogView } from './DebugLogView';
 import { ModelSelector } from './ModelSelector';
+import { EffortSelector } from './EffortSelector';
+import { WakeupBanner } from './WakeupBanner';
+import { WatchPanel } from './WatchPanel';
 
 interface SessionViewProps {
   session: SessionState;
@@ -19,12 +22,15 @@ interface SessionViewProps {
 }
 
 export function SessionView({ session, allSessions, onBack, onSwitchSession, draft, onDraftChange }: SessionViewProps) {
-  const { sendMessage, interruptSession, destroySession, compactSession, resetSession, setPermissionMode, setModel, renameSession, generateSummary, respondToPermission, dequeueMessage } = useSessions();
+  const { sendMessage, interruptSession, destroySession, compactSession, resetSession, setPermissionMode, setModel, setEffort, renameSession, updateCwd, generateSummary, respondToPermission, dequeueMessage, cancelWakeup, state } = useSessions();
   const isWorking = session.status === 'working';
   const [activeTab, setActiveTab] = useState<'chat' | 'files' | 'summary' | 'debug'>('chat');
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(session.config.name);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const [isEditingCwd, setIsEditingCwd] = useState(false);
+  const [cwdValue, setCwdValue] = useState(session.config.cwd);
+  const cwdInputRef = useRef<HTMLInputElement>(null);
   const [generatingSummary, setGeneratingSummary] = useState(false);
 
   // Clear loading state when summary arrives
@@ -47,6 +53,21 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
       renameInputRef.current.select();
     }
   }, [isRenaming]);
+
+  useEffect(() => {
+    if (isEditingCwd && cwdInputRef.current) {
+      cwdInputRef.current.focus();
+      cwdInputRef.current.select();
+    }
+  }, [isEditingCwd]);
+
+  const handleCwdSubmit = () => {
+    const trimmed = cwdValue.trim();
+    if (trimmed && trimmed !== session.config.cwd) {
+      updateCwd(session.id, trimmed);
+    }
+    setIsEditingCwd(false);
+  };
 
   const handleRenameSubmit = () => {
     const trimmed = renameValue.trim();
@@ -138,16 +159,48 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             {session.origin === 'vscode' && (
               <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
             )}
+            {session.config.controllerMode && (
+              <span
+                className="text-[10px] text-purple-300 bg-purple-500/20 border border-purple-500/40 px-1.5 py-0.5 rounded"
+                title="This session can orchestrate other sessions via MCP tools"
+              >
+                Controller
+              </span>
+            )}
             <ModelSelector
               model={session.config.model}
               onChange={(model) => setModel(session.id, model)}
+            />
+            <EffortSelector
+              effort={session.config.effort}
+              onChange={(effort) => setEffort(session.id, effort || '')}
             />
             <PermissionModeSelector
               mode={session.permissionMode}
               onChange={(mode) => setPermissionMode(session.id, mode)}
             />
           </div>
-          <div className="text-xs text-gray-500 truncate">{session.config.cwd}</div>
+          {isEditingCwd ? (
+            <input
+              ref={cwdInputRef}
+              value={cwdValue}
+              onChange={(e) => setCwdValue(e.target.value)}
+              onBlur={handleCwdSubmit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCwdSubmit();
+                if (e.key === 'Escape') { setCwdValue(session.config.cwd); setIsEditingCwd(false); }
+              }}
+              className="text-xs text-gray-400 bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 w-full focus:outline-none focus:border-blue-500"
+            />
+          ) : (
+            <div
+              className="text-xs text-gray-500 truncate cursor-pointer hover:text-gray-400 transition-colors"
+              onClick={() => { setCwdValue(session.config.cwd); setIsEditingCwd(true); }}
+              title="Click to edit working directory"
+            >
+              {session.config.cwd}
+            </div>
+          )}
         </div>
         {contextPct !== null && (
           <div className="flex items-center gap-1.5">
@@ -267,8 +320,41 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             />
           )}
 
+          {/* Controller watch panel */}
+          {session.config.controllerMode && (
+            <WatchPanel
+              sessionId={session.id}
+              triggers={Array.from(state.triggers.values())}
+            />
+          )}
+
+          {/* Scheduled wakeup banner */}
+          {session.pendingWakeup && (
+            <WakeupBanner
+              wakeup={session.pendingWakeup}
+              onCancel={() => cancelWakeup(session.id)}
+            />
+          )}
+
+          {/* Auth expired banner */}
+          {session.error === 'AUTH_EXPIRED' && (
+            <div className="mx-4 mt-2 px-3 py-2 bg-amber-900/30 border border-amber-700 rounded text-xs text-amber-200 shrink-0 flex items-center justify-between gap-2">
+              <span>Claude authentication expired. Re-login required.</span>
+              <button
+                onClick={async () => {
+                  try {
+                    await fetch('/api/claude-auth/login', { method: 'POST' });
+                  } catch {}
+                }}
+                className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white rounded transition-colors whitespace-nowrap"
+              >
+                Re-authenticate
+              </button>
+            </div>
+          )}
+
           {/* Error banner */}
-          {session.error && (
+          {session.error && session.error !== 'AUTH_EXPIRED' && (
             <div className="mx-4 mt-2 px-3 py-2 bg-red-900/30 border border-red-800 rounded text-xs text-red-300 shrink-0 flex items-center justify-between gap-2">
               <span>{session.error}</span>
               <div className="flex gap-1.5">
@@ -291,7 +377,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           )}
 
           {/* Messages */}
-          <MessageList messages={session.messages} />
+          <MessageList messages={session.messages} sessionId={session.id} />
 
           {/* Queued messages */}
           {session.queuedMessages.length > 0 && (

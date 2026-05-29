@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { UIMessage } from '@clauder/shared';
 import { MessageBubble } from './MessageBubble';
 
-export function MessageList({ messages }: { messages: UIMessage[] }) {
+export function MessageList({ messages, sessionId }: { messages: UIMessage[]; sessionId: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,7 +21,7 @@ export function MessageList({ messages }: { messages: UIMessage[] }) {
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-3">
       {messages.map((msg) => (
-        <MessageBubble key={msg.id} message={msg} />
+        <MessageBubble key={msg.id} message={msg} sessionId={sessionId} />
       ))}
     </div>
   );

@@ -10,7 +10,9 @@ export function SessionConfigForm({ onSubmit, onCancel }: SessionConfigProps) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
   const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [controllerMode, setControllerMode] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,7 +23,9 @@ export function SessionConfigForm({ onSubmit, onCancel }: SessionConfigProps) {
       cwd: cwd.trim(),
     };
     if (model.trim()) config.model = model.trim();
+    if (effort.trim()) config.effort = effort.trim() as any;
     if (systemPrompt.trim()) config.systemPrompt = systemPrompt.trim();
+    if (controllerMode) config.controllerMode = true;
 
     onSubmit(config);
   };
@@ -58,18 +62,35 @@ export function SessionConfigForm({ onSubmit, onCancel }: SessionConfigProps) {
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Model (optional)</label>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
-            >
-              <option value="">Default</option>
-              <option value="claude-opus-4-6">Claude Opus 4.6</option>
-              <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
-              <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
-            </select>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-gray-400 mb-1">Model</label>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">Default</option>
+                <option value="opus">Opus</option>
+                <option value="sonnet">Sonnet</option>
+                <option value="haiku">Haiku</option>
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-gray-400 mb-1">Effort</label>
+              <select
+                value={effort}
+                onChange={(e) => setEffort(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">Default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">Extra High</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
           </div>
 
           <div>
@@ -82,6 +103,21 @@ export function SessionConfigForm({ onSubmit, onCancel }: SessionConfigProps) {
               rows={2}
             />
           </div>
+
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={controllerMode}
+              onChange={(e) => setControllerMode(e.target.checked)}
+              className="mt-0.5 accent-purple-500"
+            />
+            <div className="flex-1">
+              <div className="text-xs font-medium text-purple-300">Controller mode</div>
+              <div className="text-[10px] text-gray-500">
+                This session can orchestrate other sessions via MCP tools (list, send, wait, read). Use for overnight automation.
+              </div>
+            </div>
+          </label>
         </div>
 
         <div className="flex justify-end gap-2 mt-5">

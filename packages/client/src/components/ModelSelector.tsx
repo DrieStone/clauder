@@ -1,8 +1,8 @@
-const MODEL_OPTIONS: { value: string; shortLabel: string; cost: string }[] = [
-  { value: '', shortLabel: 'Default', cost: '' },
-  { value: 'claude-opus-4-6', shortLabel: 'Opus', cost: '$15/$75' },
-  { value: 'claude-sonnet-4-6', shortLabel: 'Sonnet', cost: '$3/$15' },
-  { value: 'claude-haiku-4-5-20251001', shortLabel: 'Haiku', cost: '$0.80/$4' },
+const MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'Default' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'haiku', label: 'Haiku' },
 ];
 
 interface ModelSelectorProps {
@@ -21,7 +21,7 @@ export function ModelSelector({ model, onChange }: ModelSelectorProps) {
     >
       {MODEL_OPTIONS.map(opt => (
         <option key={opt.value} value={opt.value}>
-          {opt.shortLabel}{opt.cost ? ` (${opt.cost})` : ''}
+          {opt.label}
         </option>
       ))}
     </select>

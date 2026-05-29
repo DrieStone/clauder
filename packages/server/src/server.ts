@@ -3,8 +3,9 @@ import path from 'path';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
+import { execFile, spawn as spawnChild } from 'child_process';
 import type { SessionManager } from './session-manager.js';
-import { authMiddleware, setAuthCookie, getAuthToken } from './auth.js';
+import type { TriggerManager } from './triggers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,33 +19,9 @@ function resolveSafePath(cwd: string, relativePath: string): string | null {
   return resolved;
 }
 
-export function createApp(sessionManager: SessionManager) {
+export function createApp(sessionManager: SessionManager, getTriggers: () => TriggerManager) {
   const app = express();
-  app.use(express.json());
-
-  // Auth endpoints (before middleware)
-  app.post('/api/login', (req, res) => {
-    const { password } = req.body;
-    if (password === getAuthToken()) {
-      const secure = req.headers['x-forwarded-proto'] === 'https' || req.protocol === 'https';
-      setAuthCookie(res, secure);
-      res.json({ ok: true });
-    } else {
-      res.status(401).json({ error: 'Invalid password' });
-    }
-  });
-
-  app.get('/api/auth-check', (req, res) => {
-    // Quick way for client to check if already authenticated
-    // This is checked before authMiddleware runs (it's whitelisted)
-    const cookie = req.headers.cookie || '';
-    const match = cookie.split(';').find(c => c.trim().startsWith('clauder_auth='));
-    const token = match ? decodeURIComponent(match.trim().slice('clauder_auth='.length)) : '';
-    res.json({ authenticated: token === getAuthToken() });
-  });
-
-  // Protect all other /api routes
-  app.use('/api', authMiddleware);
+  app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -61,6 +38,127 @@ export function createApp(sessionManager: SessionManager) {
       return;
     }
     res.json(session.getState());
+  });
+
+  // --- Claude auth endpoints ---
+
+  // Find the Claude CLI path (same walk-up logic as session.ts)
+  const findCliPath = (): { command: string; isNative: boolean } => {
+    let dir = __dirname;
+    const candidates = [
+      'node_modules/@anthropic-ai/claude-code/bin/claude.exe',
+      'node_modules/@anthropic-ai/claude-code/cli.js',
+    ];
+    while (true) {
+      for (const rel of candidates) {
+        const candidate = path.join(dir, rel);
+        if (existsSync(candidate)) return { command: candidate, isNative: rel.endsWith('.exe') };
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return { command: 'claude', isNative: true }; // fallback
+      dir = parent;
+    }
+  };
+
+  app.get('/api/claude-auth', (_req, res) => {
+    const cli = findCliPath();
+    const cmd = cli.isNative ? cli.command : process.execPath;
+    const args = cli.isNative ? ['auth', 'status'] : [cli.command, 'auth', 'status'];
+    execFile(cmd, args, { timeout: 10000 }, (err, stdout) => {
+      if (err) {
+        res.json({ loggedIn: false, error: err.message });
+        return;
+      }
+      try {
+        res.json(JSON.parse(stdout));
+      } catch {
+        res.json({ loggedIn: false, raw: stdout });
+      }
+    });
+  });
+
+  app.post('/api/claude-auth/login', (_req, res) => {
+    const cli = findCliPath();
+    // claude auth login opens a browser on the server machine — fire and forget
+    const cmd = cli.isNative ? cli.command : process.execPath;
+    const args = cli.isNative ? ['auth', 'login'] : [cli.command, 'auth', 'login'];
+    const proc = spawnChild(cmd, args, {
+      detached: true,
+      stdio: 'ignore',
+    });
+    proc.unref();
+    res.json({ ok: true, message: 'Login flow started — complete authentication in the browser window that opened on the server.' });
+  });
+
+  // --- Triggers (watches + scheduled tasks) ---
+
+  app.get('/api/triggers', (req, res) => {
+    const sessionId = req.query.sessionId as string | undefined;
+    const source = req.query.source as 'watch' | 'scheduled' | undefined;
+    res.json(getTriggers().list({ sessionId, source }));
+  });
+
+  app.post('/api/triggers', (req, res) => {
+    const { sessionId, message, description, schedule, source } = req.body || {};
+    if (!sessionId || !message || !schedule || !source) {
+      res.status(400).json({ error: 'sessionId, message, schedule, source are required' });
+      return;
+    }
+    if (source !== 'watch' && source !== 'scheduled') {
+      res.status(400).json({ error: 'source must be "watch" or "scheduled"' });
+      return;
+    }
+    // Validate schedule
+    if (schedule.type === 'once') {
+      if (!schedule.at || isNaN(new Date(schedule.at).getTime())) {
+        res.status(400).json({ error: 'schedule.at must be a valid ISO timestamp' });
+        return;
+      }
+    } else if (schedule.type === 'recurring') {
+      const sec = Number(schedule.intervalSeconds);
+      if (!sec || sec < 30) {
+        res.status(400).json({ error: 'schedule.intervalSeconds must be >= 30' });
+        return;
+      }
+      if (!schedule.nextAt) {
+        schedule.nextAt = new Date(Date.now() + sec * 1000).toISOString();
+      }
+    } else {
+      res.status(400).json({ error: 'schedule.type must be "once" or "recurring"' });
+      return;
+    }
+
+    if (!sessionManager.getSession(sessionId)) {
+      res.status(404).json({ error: `Session ${sessionId} not found` });
+      return;
+    }
+
+    const trigger = getTriggers().create({
+      sessionId,
+      message: String(message),
+      description: String(description || ''),
+      schedule,
+      source,
+    });
+    res.json(trigger);
+  });
+
+  app.patch('/api/triggers/:id', (req, res) => {
+    const trigger = getTriggers().update(req.params.id, req.body || {});
+    if (!trigger) {
+      res.status(404).json({ error: 'Trigger not found' });
+      return;
+    }
+    res.json(trigger);
+  });
+
+  app.delete('/api/triggers/:id', (req, res) => {
+    const ok = getTriggers().remove(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Trigger not found' });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // --- File browser endpoints ---

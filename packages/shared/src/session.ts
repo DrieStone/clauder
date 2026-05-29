@@ -5,17 +5,23 @@ export type SessionOrigin = 'clauder' | 'vscode';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface SessionConfig {
   name: string;
   cwd: string;
   model?: string;
   allowedTools?: string[];
   systemPrompt?: string;
+  effort?: EffortLevel;
   maxTurns?: number;
   maxBudgetUsd?: number;
   /** SDK session ID to resume (e.g. from a VS Code session) */
   resumeSessionId?: string;
   permissionMode?: PermissionMode;
+  /** When true, this session is loaded with the Clauder MCP server,
+   * giving it tools to orchestrate other sessions. */
+  controllerMode?: boolean;
 }
 
 export interface DiscoveredSession {
@@ -49,6 +55,7 @@ export interface SessionState {
   messages: UIMessage[];
   permissionMode: PermissionMode;
   pendingPermission: PendingPermission | null;
+  pendingWakeup: PendingWakeup | null;
   summary: string | null;
   summaryGeneratedAt: string | null;
   compactedContext: string | null;
@@ -114,6 +121,39 @@ export interface PendingPermission {
   toolUseId: string;
   toolName: string;
   input: Record<string, unknown>;
+}
+
+export type TriggerSchedule =
+  | { type: 'once'; at: string }
+  | { type: 'recurring'; intervalSeconds: number; nextAt: string };
+
+export interface Trigger {
+  id: string;
+  /** Which session to send the message to when this trigger fires */
+  sessionId: string;
+  /** The message to send */
+  message: string;
+  /** Human-readable description (e.g. "Check on project X") */
+  description: string;
+  schedule: TriggerSchedule;
+  enabled: boolean;
+  createdAt: string;
+  lastFiredAt: string | null;
+  /** 'watch' = controller-managed self-check-in; 'scheduled' = user-created one-shot or recurring */
+  source: 'watch' | 'scheduled';
+}
+
+export interface PendingWakeup {
+  /** ISO timestamp when the wakeup will fire */
+  scheduledAt: string;
+  /** Human-readable reason (from Claude's tool input) */
+  reason: string;
+  /** Total delay in seconds (for display) */
+  delaySeconds: number;
+  /** Continuation prompt to send when wakeup fires */
+  prompt: string;
+  /** The ScheduleWakeup tool use ID that created this */
+  toolUseId: string;
 }
 
 export interface RateLimitInfo {

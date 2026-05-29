@@ -4,6 +4,8 @@ import { SessionCard } from './SessionCard';
 import { SessionConfigForm } from './SessionConfig';
 import { SessionBrowser } from './SessionBrowser';
 import { PauseControls } from './PauseBar';
+import { SchedulerModal } from './SchedulerModal';
+import { NotificationToggle } from './NotificationToggle';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const THIRTY_SIX_HOURS_MS = 36 * 60 * 60 * 1000;
@@ -20,6 +22,7 @@ function classifySession(s: { lastActiveAt: string; status: string }, now: numbe
 export function Dashboard() {
   const { state, createSession, setActiveSession, setShowDiscovery } = useSessions();
   const [showNewSession, setShowNewSession] = useState(false);
+  const [showScheduler, setShowScheduler] = useState(false);
   const [, setTick] = useState(0);
 
   // Re-render every 30s so tier classification and "X ago" labels stay fresh
@@ -59,6 +62,14 @@ export function Dashboard() {
               <span className={`h-1.5 w-1.5 rounded-full ${state.wsConnected ? 'bg-green-500' : 'bg-red-500'}`} />
               {state.wsConnected ? 'Connected' : 'Disconnected'}
             </span>
+            <NotificationToggle />
+            <button
+              onClick={() => setShowScheduler(true)}
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition-colors"
+              title="Schedule a message to fire at a specific time"
+            >
+              Scheduler
+            </button>
             <button
               onClick={() => setShowDiscovery(true)}
               className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition-colors"
@@ -157,6 +168,14 @@ export function Dashboard() {
         )}
 
         {state.showDiscovery && <SessionBrowser />}
+
+        {showScheduler && (
+          <SchedulerModal
+            sessions={sessions}
+            triggers={Array.from(state.triggers.values())}
+            onClose={() => setShowScheduler(false)}
+          />
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { SessionState, SessionOrigin } from '@clauder/shared';
+import type { SessionState, SessionOrigin, PendingWakeup } from '@clauder/shared';
 
 const CLAUDER_DIR = path.join(os.homedir(), '.clauder');
 const SESSIONS_FILE = path.join(CLAUDER_DIR, 'sessions.json');
@@ -18,6 +18,7 @@ export interface PersistedSession {
   summary?: string | null;
   summaryGeneratedAt?: string | null;
   compactedContext?: string | null;
+  pendingWakeup?: PendingWakeup | null;
   createdAt: string;
   lastActiveAt: string;
 }
@@ -57,6 +58,7 @@ export function saveSessions(sessions: SessionState[]): void {
     summary: s.summary,
     summaryGeneratedAt: s.summaryGeneratedAt,
     compactedContext: s.compactedContext,
+    pendingWakeup: s.pendingWakeup,
     createdAt: s.createdAt,
     lastActiveAt: s.lastActiveAt,
   }));
