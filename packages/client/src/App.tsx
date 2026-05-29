@@ -4,6 +4,7 @@ import { SessionView } from './components/SessionView';
 import { PauseBar } from './components/PauseBar';
 import { useEffect, useCallback, useRef } from 'react';
 import { onNotificationClick, markRead } from './lib/notifications';
+import { getScratchSession, getNonScratchSessions } from './lib/sessions';
 
 function AppContent() {
   const { state, setActiveSession } = useSessions();
@@ -22,13 +23,13 @@ function AppContent() {
       }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
-        const scratch = Array.from(state.sessions.values()).find(s => s.config.isScratch);
+        const scratch = getScratchSession(state.sessions);
         if (scratch) setActiveSession(scratch.id);
       }
       // Ctrl+1-8 to switch to session by index (excluding scratch)
       if (e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '8') {
         const idx = parseInt(e.key) - 1;
-        const sessions = Array.from(state.sessions.values()).filter(s => !s.config.isScratch);
+        const sessions = getNonScratchSessions(state.sessions);
         if (idx < sessions.length) {
           setActiveSession(sessions[idx].id);
         }

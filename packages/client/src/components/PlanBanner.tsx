@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { RichMarkdown } from './RichMarkdown';
 import type { PendingPlanInfo } from '../context/SessionContext';
 
 interface PlanBannerProps {
@@ -30,7 +29,7 @@ export function PlanBanner({ plan, onAccept, onReject }: PlanBannerProps) {
       {expanded && (
         <>
           <div className="px-3 py-2 text-xs text-purple-100 max-h-[40vh] overflow-y-auto prose prose-invert prose-sm max-w-none [&_pre]:bg-purple-900/40 [&_pre]:border [&_pre]:border-purple-800 [&_code]:text-xs">
-            <Markdown remarkPlugins={[remarkGfm]}>{plan.plan}</Markdown>
+            <RichMarkdown>{plan.plan}</RichMarkdown>
           </div>
           <div className="px-3 py-2 border-t border-purple-800/60 flex flex-col gap-2">
             <input

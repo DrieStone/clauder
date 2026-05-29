@@ -1,40 +1,8 @@
-import { useState, useRef, useCallback, type HTMLAttributes } from 'react';
+import { useState } from 'react';
 import type { UIMessage, ToolUseInfo } from '@clauder/shared';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeExternalLinks from 'rehype-external-links';
 import { ToolUseAccordion } from './ToolUseAccordion';
+import { RichMarkdown } from './RichMarkdown';
 import { useSessions } from '../context/SessionContext';
-
-function CodeBlock({ children, ...props }: HTMLAttributes<HTMLPreElement>) {
-  const [copied, setCopied] = useState(false);
-  const preRef = useRef<HTMLPreElement>(null);
-
-  const handleCopy = useCallback(() => {
-    const text = preRef.current?.textContent ?? '';
-    if (!text) return;
-    navigator.clipboard.writeText(text)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {/* clipboard write blocked — fail silently */});
-  }, []);
-
-  return (
-    <div className="relative group">
-      <pre ref={preRef} {...props}>{children}</pre>
-      <button
-        type="button"
-        onClick={handleCopy}
-        aria-label="Copy code"
-        className="absolute top-1.5 right-1.5 px-1.5 py-0.5 text-[10px] bg-gray-700/80 hover:bg-gray-600 text-gray-200 rounded opacity-40 group-hover:opacity-100 transition-opacity"
-      >
-        {copied ? '✓ Copied' : 'Copy'}
-      </button>
-    </div>
-  );
-}
 
 export function summarizeToolUse(tool: ToolUseInfo): string {
   const input = tool.input;
@@ -139,18 +107,7 @@ export function MessageBubble({ message, sessionId }: { message: UIMessage; sess
         )}
         {message.content ? (
           <div className="prose prose-invert prose-sm max-w-none break-words [&_pre]:bg-gray-900 [&_pre]:border [&_pre]:border-gray-700 [&_pre]:rounded [&_pre]:overflow-x-auto [&_code]:text-xs [&_code]:break-all [&_table]:border-collapse [&_table]:text-xs [&_th]:border [&_th]:border-gray-600 [&_th]:bg-gray-900 [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_tr:nth-child(even)]:bg-gray-900/40 [&_a]:text-blue-400 [&_a]:underline [&_a]:break-all [&_table]:display-table [&_.table-wrapper]:overflow-x-auto">
-            <Markdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[[rehypeExternalLinks, { target: '_blank', rel: ['noopener', 'noreferrer'] }]]}
-              components={{
-                pre: CodeBlock,
-                table: ({ children }) => (
-                  <div className="overflow-x-auto my-2">
-                    <table className="border-collapse text-xs min-w-full">{children}</table>
-                  </div>
-                ),
-              }}
-            >{message.content}</Markdown>
+            <RichMarkdown>{message.content}</RichMarkdown>
           </div>
         ) : null}
         {message.isStreaming && (

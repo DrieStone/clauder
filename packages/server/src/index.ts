@@ -8,6 +8,9 @@ import { TriggerManager } from './triggers.js';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
+/** Model used for the auto-created scratch session. Cheap enough for quick lookups, capable enough for code questions. */
+const SCRATCH_MODEL = 'claude-sonnet-4-6';
+
 // Ensure node is findable when the server is started without a full shell PATH
 // (e.g. via nohup). Prepend the directory of the current node binary and common locations.
 {
@@ -69,7 +72,7 @@ sessionManager.restoreFromDisk();
     sessionManager.createSession({
       name: 'Scratch',
       cwd: homedir(),
-      model: 'claude-sonnet-4-6',
+      model: SCRATCH_MODEL,
       isScratch: true,
     });
     console.log('[Clauder] Auto-created scratch session');

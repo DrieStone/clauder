@@ -63,7 +63,6 @@ export type WsOutboundMessage =
   | { type: 'trigger_updated'; trigger: Trigger }
   | { type: 'trigger_deleted'; triggerId: string }
   | { type: 'trigger_fired'; trigger: Trigger }
-  | { type: 'claude_md_candidate'; sessionId: string; candidate: string; messageId: string }
   | { type: 'claude_md_applied'; sessionId: string; candidate: string }
   | { type: 'pending_plan'; sessionId: string; toolUseId: string; plan: string; messageId: string }
   | { type: 'plan_resolved'; sessionId: string; toolUseId: string }

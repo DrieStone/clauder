@@ -359,6 +359,12 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case 'SKILLS_LIST': {
+      // Server re-broadcasts on every WS reconnect; if nothing changed, skip the Map churn.
+      const prev = state.sessionSkills.get(action.sessionId);
+      if (prev && prev.length === action.skills.length &&
+          prev.every((s, i) => s.name === action.skills[i].name && s.source === action.skills[i].source)) {
+        return state;
+      }
       const ss = new Map(state.sessionSkills);
       ss.set(action.sessionId, action.skills);
       return { ...state, sessionSkills: ss };
@@ -661,9 +667,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         break;
       case 'trigger_fired':
         dispatch({ type: 'TRIGGER_FIRED', trigger: msg.trigger });
-        break;
-      case 'claude_md_candidate':
-        // Candidates are extracted from message content client-side; no state update needed
         break;
       case 'claude_md_applied':
         // Apply confirmation — button disables locally, no state update needed

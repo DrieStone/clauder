@@ -6,6 +6,7 @@ import { SessionBrowser } from './SessionBrowser';
 import { PauseControls } from './PauseBar';
 import { SchedulerModal } from './SchedulerModal';
 import { NotificationToggle } from './NotificationToggle';
+import { getScratchSession, getNonScratchSessions } from '../lib/sessions';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const THIRTY_SIX_HOURS_MS = 36 * 60 * 60 * 1000;
@@ -31,10 +32,9 @@ export function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  const allSessions = Array.from(state.sessions.values());
   // Scratch session gets its own pinned section above all tiers
-  const scratchSession = allSessions.find(s => s.config.isScratch);
-  const sessions = allSessions.filter(s => !s.config.isScratch);
+  const scratchSession = getScratchSession(state.sessions);
+  const sessions = getNonScratchSessions(state.sessions);
   const now = Date.now();
 
   const byRecent = (a: typeof sessions[0], b: typeof sessions[0]) =>

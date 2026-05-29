@@ -933,16 +933,6 @@ export class ManagedSession {
               }
             }
 
-            // Detect CLAUDE.md candidates in the completed assistant message
-            if (text) {
-              const candidateRe = /\[CLAUDE\.md candidate:\s*([^\]]+)\]/g;
-              let cm: RegExpExecArray | null;
-              while ((cm = candidateRe.exec(text)) !== null) {
-                const candidate = cm[1].trim();
-                this.broadcast({ type: 'claude_md_candidate', sessionId: this.id, candidate, messageId: msgId });
-              }
-            }
-
             // Detect AskUserQuestion tool uses — broadcast interactive question to client
             for (const tu of toolUses) {
               if (tu.name === 'AskUserQuestion') {
