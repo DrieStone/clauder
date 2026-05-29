@@ -14,16 +14,21 @@ function AppContent() {
   // Persist unsent drafts per session across navigation
   const draftsRef = useRef<Map<string, string>>(new Map());
 
-  // Keyboard shortcut: Escape to go back to dashboard
+  // Keyboard shortcut: Escape to go back to dashboard; Cmd/Ctrl+Shift+S jumps to scratch
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape' && state.activeSessionId) {
         setActiveSession(null);
       }
-      // Ctrl+1-8 to switch to session by index
-      if (e.ctrlKey && e.key >= '1' && e.key <= '8') {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        const scratch = Array.from(state.sessions.values()).find(s => s.config.isScratch);
+        if (scratch) setActiveSession(scratch.id);
+      }
+      // Ctrl+1-8 to switch to session by index (excluding scratch)
+      if (e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '8') {
         const idx = parseInt(e.key) - 1;
-        const sessions = Array.from(state.sessions.values());
+        const sessions = Array.from(state.sessions.values()).filter(s => !s.config.isScratch);
         if (idx < sessions.length) {
           setActiveSession(sessions[idx].id);
         }

@@ -11,6 +11,7 @@ import { ModelSelector } from './ModelSelector';
 import { EffortSelector } from './EffortSelector';
 import { WakeupBanner } from './WakeupBanner';
 import { WatchPanel } from './WatchPanel';
+import { PlanBanner } from './PlanBanner';
 
 interface SessionViewProps {
   session: SessionState;
@@ -22,7 +23,7 @@ interface SessionViewProps {
 }
 
 export function SessionView({ session, allSessions, onBack, onSwitchSession, draft, onDraftChange }: SessionViewProps) {
-  const { sendMessage, interruptSession, destroySession, compactSession, resetSession, setPermissionMode, setModel, setEffort, renameSession, updateCwd, generateSummary, respondToPermission, dequeueMessage, cancelWakeup, state } = useSessions();
+  const { sendMessage, interruptSession, destroySession, compactSession, resetSession, setPermissionMode, setModel, setEffort, renameSession, updateCwd, generateSummary, respondToPermission, dequeueMessage, cancelWakeup, respondToPlan, clearSession, state } = useSessions();
   const isWorking = session.status === 'working';
   const [activeTab, setActiveTab] = useState<'chat' | 'files' | 'summary' | 'debug'>('chat');
   const [isRenaming, setIsRenaming] = useState(false);
@@ -228,17 +229,31 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             </button>
           </div>
         )}
-        <button
-          onClick={() => {
-            if (confirm('Destroy this session?')) {
-              destroySession(session.id);
-              onBack();
-            }
-          }}
-          className="text-xs text-red-400 hover:text-red-300 transition-colors"
-        >
-          Destroy
-        </button>
+        {session.config.isScratch ? (
+          <button
+            onClick={() => {
+              if (confirm('Clear scratch conversation? This cannot be undone.')) {
+                clearSession(session.id);
+              }
+            }}
+            className="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+            title="Wipe the scratch conversation. The session itself stays."
+          >
+            Clear
+          </button>
+        ) : (
+          <button
+            onClick={() => {
+              if (confirm('Destroy this session?')) {
+                destroySession(session.id);
+                onBack();
+              }
+            }}
+            className="text-xs text-red-400 hover:text-red-300 transition-colors"
+          >
+            Destroy
+          </button>
+        )}
       </div>
 
       {/* Tab bar */}
@@ -336,6 +351,15 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             />
           )}
 
+          {/* Plan awaiting accept/reject */}
+          {state.pendingPlans.has(session.id) && (
+            <PlanBanner
+              plan={state.pendingPlans.get(session.id)!}
+              onAccept={(feedback) => respondToPlan(session.id, state.pendingPlans.get(session.id)!.toolUseId, 'accept', feedback)}
+              onReject={(feedback) => respondToPlan(session.id, state.pendingPlans.get(session.id)!.toolUseId, 'reject', feedback)}
+            />
+          )}
+
           {/* Auth expired banner */}
           {session.error === 'AUTH_EXPIRED' && (
             <div className="mx-4 mt-2 px-3 py-2 bg-amber-900/30 border border-amber-700 rounded text-xs text-amber-200 shrink-0 flex items-center justify-between gap-2">
@@ -406,7 +430,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           {/* Input */}
           <PromptInput
             sessionId={session.id}
-            onSend={(msg, images) => sendMessage(session.id, msg, images)}
+            onSend={(msg, images, planMode) => sendMessage(session.id, msg, images, planMode)}
             onInterrupt={() => interruptSession(session.id)}
             isWorking={isWorking}
             draft={draft}

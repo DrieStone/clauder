@@ -1,9 +1,10 @@
-import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger } from './session.js';
+import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from './session.js';
 
 // Browser -> Server
 export type WsInboundMessage =
   | { type: 'create_session'; config: SessionConfig }
-  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[] }
+  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; planMode?: boolean }
+  | { type: 'plan_response'; sessionId: string; toolUseId: string; decision: 'accept' | 'reject'; feedback?: string }
   | { type: 'destroy_session'; sessionId: string }
   | { type: 'interrupt_session'; sessionId: string }
   | { type: 'compact_session'; sessionId: string }
@@ -22,6 +23,9 @@ export type WsInboundMessage =
   | { type: 'question_response'; sessionId: string; toolUseId: string; answer: string }
   | { type: 'dequeue_message'; sessionId: string; index: number }
   | { type: 'cancel_wakeup'; sessionId: string }
+  | { type: 'apply_claude_md_candidate'; sessionId: string; candidate: string }
+  | { type: 'list_skills'; sessionId: string }
+  | { type: 'clear_session'; sessionId: string }
   | { type: 'ping' };
 
 // Server -> Browser
@@ -59,4 +63,9 @@ export type WsOutboundMessage =
   | { type: 'trigger_updated'; trigger: Trigger }
   | { type: 'trigger_deleted'; triggerId: string }
   | { type: 'trigger_fired'; trigger: Trigger }
+  | { type: 'claude_md_candidate'; sessionId: string; candidate: string; messageId: string }
+  | { type: 'claude_md_applied'; sessionId: string; candidate: string }
+  | { type: 'pending_plan'; sessionId: string; toolUseId: string; plan: string; messageId: string }
+  | { type: 'plan_resolved'; sessionId: string; toolUseId: string }
+  | { type: 'skills_list'; sessionId: string; skills: Skill[] }
   | { type: 'error'; sessionId: string; message: string };

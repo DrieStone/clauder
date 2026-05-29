@@ -1,9 +1,12 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import type { Server } from 'http';
 import type { WsInboundMessage, WsOutboundMessage } from '@clauder/shared';
 import { SessionManager } from './session-manager.js';
 import { discoverSessions } from './discovery.js';
 import { getRateLimitInfo } from './rate-limits.js';
+import { getSkillsForCwd } from './skills.js';
 import type { TriggerManager } from './triggers.js';
 
 export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager) {
@@ -76,6 +79,16 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       // TriggerManager may not be initialized yet — skip
     }
 
+    // Send skill list per session so the dropdown is populated on reconnect
+    for (const session of sessionManager.getAllSessions()) {
+      try {
+        const skills = getSkillsForCwd(session.config.cwd);
+        ws.send(JSON.stringify({ type: 'skills_list', sessionId: session.id, skills }));
+      } catch {
+        // Per-session scan failures are non-fatal — client falls back to empty list
+      }
+    }
+
     ws.on('message', async (data) => {
       try {
         const msg: WsInboundMessage = JSON.parse(data.toString());
@@ -117,7 +130,23 @@ async function handleMessage(
 
     case 'send_message': {
       try {
-        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images);
+        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'plan_response': {
+      try {
+        const session = sessionManager.getSession(msg.sessionId);
+        if (!session) throw new Error('Session not found');
+        // Send the user's decision as a regular message; Claude will see it as a follow-up turn
+        const followUp = msg.decision === 'accept'
+          ? `Plan approved. Proceed with the plan as described.${msg.feedback ? `\n\nAdditional note: ${msg.feedback}` : ''}`
+          : `Plan rejected. ${msg.feedback || 'Please reconsider the approach and propose an alternative.'}`;
+        broadcast({ type: 'plan_resolved', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
+        await sessionManager.sendMessage(msg.sessionId, followUp);
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
@@ -278,6 +307,49 @@ async function handleMessage(
     case 'cancel_wakeup': {
       try {
         sessionManager.cancelWakeup(msg.sessionId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'apply_claude_md_candidate': {
+      try {
+        const session = sessionManager.getSession(msg.sessionId);
+        if (!session) throw new Error('Session not found');
+        const candidate = msg.candidate.trim();
+        if (!candidate) throw new Error('Empty candidate');
+        if (candidate.length > 500) throw new Error('Candidate too long');
+        const claudeMdPath = join(session.config.cwd, 'CLAUDE.md');
+        let existing = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf8') : '';
+        const sectionHeader = '## Discovered during sessions';
+        if (!existing.includes(sectionHeader)) {
+          existing = existing.trimEnd() + (existing ? '\n\n' : '') + sectionHeader + '\n';
+        }
+        existing = existing.trimEnd() + `\n- ${candidate}\n`;
+        writeFileSync(claudeMdPath, existing, 'utf8');
+        broadcast({ type: 'claude_md_applied', sessionId: msg.sessionId, candidate });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: `CLAUDE.md update failed: ${err.message}` });
+      }
+      break;
+    }
+
+    case 'list_skills': {
+      try {
+        const session = sessionManager.getSession(msg.sessionId);
+        if (!session) throw new Error('Session not found');
+        const skills = getSkillsForCwd(session.config.cwd);
+        broadcast({ type: 'skills_list', sessionId: msg.sessionId, skills });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: `Skill discovery failed: ${err.message}` });
+      }
+      break;
+    }
+
+    case 'clear_session': {
+      try {
+        await sessionManager.clearSession(msg.sessionId);
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }

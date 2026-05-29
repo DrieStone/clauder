@@ -183,10 +183,11 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
     [handleSend],
   );
 
+  const isScratch = !!session.config.isScratch;
   return (
     <div
       className={`bg-gray-900 border rounded-xl overflow-hidden transition-colors flex flex-col ${
-        isWorking ? 'border-amber-700/60' : 'border-gray-800'
+        isWorking ? 'border-amber-700/60' : isScratch ? 'border-amber-800/60' : 'border-gray-800'
       }`}
     >
       {/* Working progress bar */}
@@ -236,6 +237,9 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
             <StatusBadge status={session.status} />
             {session.origin === 'vscode' && (
               <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
+            )}
+            {session.config.isScratch && (
+              <span className="text-[10px] text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded">📝 Scratch</span>
             )}
             <PermissionModeSelector
               mode={session.permissionMode}
@@ -432,6 +436,9 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
             <StatusBadge status={session.status} />
             {session.origin === 'vscode' && (
               <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
+            )}
+            {session.config.isScratch && (
+              <span className="text-[10px] text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded">📝 Scratch</span>
             )}
             <PermissionModeSelector
               mode={session.permissionMode}

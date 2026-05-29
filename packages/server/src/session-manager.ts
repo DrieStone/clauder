@@ -60,7 +60,9 @@ export class SessionManager {
   }
 
   createSession(config: SessionConfig): SessionState {
-    if (this.sessions.size >= MAX_SESSIONS) {
+    // The scratch session is exempt from the cap — it's auto-created and the user
+    // shouldn't be punished for using it.
+    if (!config.isScratch && this.sessions.size >= MAX_SESSIONS) {
       throw new Error(`Maximum of ${MAX_SESSIONS} sessions reached`);
     }
 
@@ -75,11 +77,12 @@ export class SessionManager {
 
     const state = session.getState();
     this.broadcast({ type: 'session_created', session: state });
+    session.broadcastSkills();
     this.persist();
     return state;
   }
 
-  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[]): Promise<void> {
+  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean }): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
@@ -87,12 +90,12 @@ export class SessionManager {
 
     // If paused, queue instead of sending
     if (this.pauseUntil && new Date(this.pauseUntil).getTime() > Date.now()) {
-      session.queueMessage(message, images);
+      session.queueMessage(message, images, { internal: opts?.internal });
       return;
     }
 
     // Don't await - let it run in the background while streaming events
-    session.sendMessage(message, images).then(() => {
+    session.sendMessage(message, images, opts).then(() => {
       this.persist();
       this.scheduleSummary(sessionId);
     }).catch(err => {
@@ -124,6 +127,16 @@ export class SessionManager {
     this.persist();
   }
 
+  async clearSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    console.log(`[SessionManager] Clearing session ${sessionId}`);
+    session.clearMessages();
+    this.persist();
+  }
+
   dequeueMessage(sessionId: string, index: number): void {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -143,6 +156,9 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
+    }
+    if (session.config.isScratch) {
+      throw new Error('Scratch session cannot be destroyed — use Clear instead.');
     }
     await session.destroy();
     this.sessions.delete(sessionId);

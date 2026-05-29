@@ -31,7 +31,10 @@ export function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  const sessions = Array.from(state.sessions.values());
+  const allSessions = Array.from(state.sessions.values());
+  // Scratch session gets its own pinned section above all tiers
+  const scratchSession = allSessions.find(s => s.config.isScratch);
+  const sessions = allSessions.filter(s => !s.config.isScratch);
   const now = Date.now();
 
   const byRecent = (a: typeof sessions[0], b: typeof sessions[0]) =>
@@ -98,6 +101,24 @@ export function Dashboard() {
           </div>
         ) : (
           <div className="space-y-8">
+            {/* Scratch: always pinned at the top, single card. */}
+            {scratchSession && (
+              <section>
+                <h2 className="text-xs font-medium text-amber-500/80 uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <span>Scratch</span>
+                  <span className="text-[10px] text-gray-500 normal-case tracking-normal">always available · Cmd/Ctrl+Shift+S to jump</span>
+                </h2>
+                <div className="grid grid-cols-1 active-grid gap-3">
+                  <SessionCard
+                    key={scratchSession.id}
+                    session={scratchSession}
+                    tier="warm"
+                    onClick={() => setActiveSession(scratchSession.id)}
+                  />
+                </div>
+              </section>
+            )}
+
             {/* Active: compact cards sorted alphabetically */}
             {hotSessions.length > 0 && (
               <section>

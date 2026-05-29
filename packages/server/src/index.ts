@@ -1,4 +1,5 @@
 import http from 'http';
+import { homedir } from 'os';
 import { createApp } from './server.js';
 import { SessionManager } from './session-manager.js';
 import { setupWebSocket } from './ws.js';
@@ -40,7 +41,9 @@ onRateLimitUpdate((rateLimit) => {
 // Initialize triggers (fire messages via sessionManager, broadcast events to clients)
 triggerManager = new TriggerManager(
   (sessionId, message) => {
-    sessionManager.sendMessage(sessionId, message, []).catch((err: any) => {
+    // internal: true — trigger-fired messages are programmatic, so task-switch
+    // classification and wakeup-cancellation should skip them
+    sessionManager.sendMessage(sessionId, message, [], { internal: true }).catch((err: any) => {
       console.error(`[TriggerManager] sendMessage failed for ${sessionId}:`, err.message);
     });
   },
@@ -57,6 +60,21 @@ triggerManager.load();
 
 // Restore sessions from disk now that broadcast is wired
 sessionManager.restoreFromDisk();
+
+// Bootstrap the floating scratch session if it doesn't exist yet.
+// Always-available, hidden from the main session list, can be cleared but not destroyed.
+{
+  const hasScratch = sessionManager.getAllSessions().some(s => s.config.isScratch);
+  if (!hasScratch) {
+    sessionManager.createSession({
+      name: 'Scratch',
+      cwd: homedir(),
+      model: 'claude-sonnet-4-6',
+      isScratch: true,
+    });
+    console.log('[Clauder] Auto-created scratch session');
+  }
+}
 
 // Start listening on all interfaces (0.0.0.0) for Tailscale/remote access
 server.listen(PORT, '0.0.0.0', () => {

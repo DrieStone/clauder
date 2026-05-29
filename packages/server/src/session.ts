@@ -8,6 +8,8 @@ import type { ChildProcess } from 'child_process';
 import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
 import { recordCostDelta } from './rate-limits.js';
+import { classifyTaskSwitch } from './task-classifier.js';
+import { getSkillsForCwd } from './skills.js';
 
 // Walk up the directory tree from this file to find the Claude CLI binary.
 // v2.1.120+ ships a native binary at bin/claude.exe instead of cli.js.
@@ -89,6 +91,10 @@ export class ManagedSession {
   pendingPermission: PendingPermission | null = null;
   pendingWakeup: PendingWakeup | null = null;
   private wakeupTimer: NodeJS.Timeout | null = null;
+  /** True while a Haiku task-switch classification is in flight. Concurrent sendMessage calls queue instead of racing. */
+  private pendingTaskSwitch = false;
+  /** Epoch ms of last auto-compact, used as a cooldown so the classifier doesn't re-fire on dequeued messages. */
+  private lastAutoCompactAt = 0;
 
   private activeProcess: ChildProcess | null = null;
   private broadcast: (msg: WsOutboundMessage) => void;
@@ -208,8 +214,8 @@ export class ManagedSession {
   }
 
   /** Queue a message to be sent after the current turn finishes */
-  queueMessage(message: string, images?: ImageAttachment[]): void {
-    this.queuedMessages.push({ text: message, images: images?.length ? images : undefined });
+  queueMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean }): void {
+    this.queuedMessages.push({ text: message, images: images?.length ? images : undefined, internal: opts?.internal });
     this.broadcast({
       type: 'queue_update',
       sessionId: this.id,
@@ -252,8 +258,9 @@ export class ManagedSession {
 
     this.broadcast({ type: 'wakeup_cleared', sessionId: this.id });
 
-    // Send as a normal user message (will be queued if session is currently working)
-    this.sendMessage(message, []).catch(err => {
+    // Send as an internal message — programmatic, not user input, so task-switch
+    // classification should skip it
+    this.sendMessage(message, [], { internal: true }).catch(err => {
       console.error(`[Session ${this.id}] Wakeup send failed: ${err.message}`);
     });
   }
@@ -328,6 +335,17 @@ export class ManagedSession {
       sessionId: this.id,
       cwd,
     });
+    this.broadcastSkills();
+  }
+
+  /** Broadcast the current skill list for this session's cwd. Called on create + cwd change. */
+  broadcastSkills(): void {
+    try {
+      const skills = getSkillsForCwd(this.config.cwd);
+      this.broadcast({ type: 'skills_list', sessionId: this.id, skills });
+    } catch {
+      // discovery failures are non-fatal — client falls back to empty list
+    }
   }
 
   /** Emit a debug log entry to both the in-memory array and WebSocket */
@@ -539,16 +557,50 @@ export class ManagedSession {
     }
   }
 
-  async sendMessage(message: string, images?: ImageAttachment[]): Promise<void> {
-    // If busy, queue the message for later
-    if (this.status === 'working') {
-      this.queueMessage(message, images);
+  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean }): Promise<void> {
+    // If busy OR a task-switch classification is in flight, queue and bail.
+    // Queueing while classifying preserves order: messages arriving during the
+    // ~500ms Haiku call wait their turn instead of racing.
+    if (this.status === 'working' || this.pendingTaskSwitch) {
+      this.queueMessage(message, images, { internal: opts?.internal });
       return;
     }
 
-    // Any new user input cancels a pending wakeup — Claude has fresh input now
-    if (this.pendingWakeup) {
+    // Any new user input cancels a pending wakeup — Claude has fresh input now.
+    // Skip for internal messages: a wakeup-fired message shouldn't cancel itself.
+    if (this.pendingWakeup && !opts?.internal) {
       this.cancelWakeup();
+    }
+
+    // Auto-compact when the user starts a new task after a pause.
+    // Internal messages (triggers, wakeups, queue-drains of programmatic sends) skip this.
+    if (!opts?.internal && this.shouldCheckForTaskSwitch(message)) {
+      this.pendingTaskSwitch = true;
+      let isSwitch = false;
+      try {
+        isSwitch = await classifyTaskSwitch(this.messages, message);
+      } catch {
+        // classifier errors never block the message
+      }
+      this.pendingTaskSwitch = false;
+
+      if (isSwitch) {
+        this.lastAutoCompactAt = Date.now();
+        const sysMsg: UIMessage = {
+          id: uuid(),
+          role: 'system',
+          content: '↩ New task detected — compacting context before continuing.',
+          timestamp: new Date().toISOString(),
+        };
+        this.messages.push(sysMsg);
+        this.broadcast({ type: 'assistant_message', sessionId: this.id, messageId: sysMsg.id, text: sysMsg.content });
+        // Put the real message at the FRONT of the queue so it runs before any messages
+        // that arrived during the classifier await. /compact runs first via recursion below.
+        this.queuedMessages.unshift({ text: message, images: images?.length ? images : undefined, internal: false });
+        this.broadcast({ type: 'queue_update', sessionId: this.id, queue: [...this.queuedMessages] });
+        await this.sendMessage('/compact', undefined, { internal: true });
+        return;
+      }
     }
 
     // Add user message to history
@@ -588,7 +640,10 @@ export class ManagedSession {
 
     try {
       // Build CLI flags
-      const flags: string[] = ['--permission-mode', this.permissionMode];
+      // One-shot plan mode overrides the session's permission mode for this CLI invocation only.
+      // The session's persistent permissionMode is unchanged.
+      const effectiveMode = opts?.planMode ? 'plan' : this.permissionMode;
+      const flags: string[] = ['--permission-mode', effectiveMode];
 
       if (this.sdkSessionId) {
         flags.push('--resume', this.sdkSessionId);
@@ -626,6 +681,7 @@ export class ManagedSession {
 
       const systemParts: string[] = [
         'When running Bash commands that involve SSH, SCP, network requests, package installs (apt-get, pip, npm), or builds, always set the timeout parameter to at least 300000 (5 minutes). The default 2-minute timeout is too short for these operations.',
+        'When you discover a non-obvious rule, constraint, workaround, or hard-won lesson during this session — something a future Claude session would need to avoid a mistake — flag it with this exact format on its own line: "[CLAUDE.md candidate: <concise rule, 10-20 words>]". Only flag things genuinely worth persisting; do not flag obvious facts or things already in CLAUDE.md.',
       ];
 
       if (this.config.controllerMode) {
@@ -857,6 +913,33 @@ export class ManagedSession {
             for (const tu of toolUses) {
               if (tu.name === 'ScheduleWakeup') {
                 this.scheduleWakeup(tu.input, tu.id);
+              }
+            }
+
+            // Detect ExitPlanMode tool uses — surface plan to user for explicit accept/reject
+            for (const tu of toolUses) {
+              if (tu.name === 'ExitPlanMode') {
+                const plan = String((tu.input as any)?.plan ?? '').trim();
+                if (plan) {
+                  this.broadcast({
+                    type: 'pending_plan',
+                    sessionId: this.id,
+                    toolUseId: tu.id,
+                    plan,
+                    messageId: msgId,
+                  });
+                  console.log(`[Session ${this.id}] ExitPlanMode detected (${plan.length} chars)`);
+                }
+              }
+            }
+
+            // Detect CLAUDE.md candidates in the completed assistant message
+            if (text) {
+              const candidateRe = /\[CLAUDE\.md candidate:\s*([^\]]+)\]/g;
+              let cm: RegExpExecArray | null;
+              while ((cm = candidateRe.exec(text)) !== null) {
+                const candidate = cm[1].trim();
+                this.broadcast({ type: 'claude_md_candidate', sessionId: this.id, candidate, messageId: msgId });
               }
             }
 
@@ -1178,8 +1261,10 @@ export class ManagedSession {
         sessionId: this.id,
         queue: [...this.queuedMessages],
       });
-      // Fire and forget - the recursive call handles its own lifecycle
-      this.sendMessage(next.text, next.images).catch(err => {
+      // Fire and forget - the recursive call handles its own lifecycle.
+      // Preserve the internal flag so programmatic messages (triggers/wakeups)
+      // that were queued while busy still skip task-switch classification.
+      this.sendMessage(next.text, next.images, { internal: next.internal }).catch(err => {
         console.error(`Error processing queued message for session ${this.id}:`, err);
       });
     }
@@ -1193,6 +1278,35 @@ export class ManagedSession {
     this.error = null;
     this.contextUsage = null;
     this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle' });
+  }
+
+  /**
+   * Wipe conversation state without preserving the session for resume.
+   * Unlike reset(), this clears messages and does NOT prime the next message with context.
+   * Used by the scratch session's Clear button.
+   */
+  clearMessages(): void {
+    // Kill any in-flight CLI process so it doesn't try to broadcast against cleared state
+    if (this.activeProcess) {
+      try { this.activeProcess.kill('SIGTERM'); } catch { /* ignore */ }
+      this.activeProcess = null;
+    }
+    this.messages = [];
+    this.queuedMessages = [];
+    this.sdkSessionId = null;
+    this.needsFork = false;
+    this.wasReset = false;
+    this.summary = null;
+    this.summaryGeneratedAt = null;
+    this.compactedContext = null;
+    this.contextUsage = null;
+    this.status = 'idle';
+    this.error = null;
+    this.currentToolActivity = null;
+    this.pendingPermission = null;
+    this.debugLog = [];
+    // Re-broadcast full session state so the client replaces local state wholesale
+    this.broadcast({ type: 'session_created', session: this.getState() });
   }
 
   private autoRecoverFrom413(): void {
@@ -1231,9 +1345,29 @@ export class ManagedSession {
     });
   }
 
+  /** Decide whether to run the Haiku task-switch classifier on this message. */
+  private shouldCheckForTaskSwitch(message: string): boolean {
+    if (message.startsWith('/')) return false;           // commands aren't tasks
+    if (message.trim().length < 20) return false;        // too short to classify reliably
+    if (!process.env.ANTHROPIC_API_KEY) return false;
+    if (Date.now() - this.lastAutoCompactAt < 120_000) return false; // 2-min cooldown after compact
+    // Only check when the user has been away a while — avoids latency during active back-and-forth
+    const lastUserMsg = [...this.messages].reverse().find(m => m.role === 'user');
+    if (!lastUserMsg) return false;
+    const msSinceLastMsg = Date.now() - new Date(lastUserMsg.timestamp).getTime();
+    if (msSinceLastMsg < 5 * 60 * 1000) return false;
+    // Need enough context to warrant compaction
+    return this.messages.filter(m => m.role !== 'system').length >= 6;
+  }
+
+  /** Clear stuck pendingTaskSwitch state — analog to clearWakeup. Defensive utility. */
+  clearPendingTaskSwitch(): void {
+    this.pendingTaskSwitch = false;
+  }
+
   async compact(): Promise<void> {
-    // Send /compact as a user message to trigger context compaction
-    await this.sendMessage('/compact');
+    // Send /compact as an internal message — bypasses task-switch classification
+    await this.sendMessage('/compact', undefined, { internal: true });
   }
 
   async interrupt(): Promise<void> {

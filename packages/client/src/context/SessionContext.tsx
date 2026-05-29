@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from '@clauder/shared';
 import { WsClient } from '../lib/ws-client';
 import { notify } from '../lib/notifications';
 
@@ -9,6 +9,12 @@ export interface PendingQuestionInfo {
   question: string;
   header?: string;
   options?: { label: string; description?: string }[];
+}
+
+export interface PendingPlanInfo {
+  toolUseId: string;
+  plan: string;
+  messageId: string;
 }
 
 interface AppState {
@@ -22,8 +28,12 @@ interface AppState {
   pauseUntil: string | null;
   /** Pending AskUserQuestion per session: sessionId -> question info */
   pendingQuestions: Map<string, PendingQuestionInfo>;
+  /** Pending ExitPlanMode per session: sessionId -> plan info */
+  pendingPlans: Map<string, PendingPlanInfo>;
   /** All triggers (watches + scheduled), keyed by trigger id */
   triggers: Map<string, Trigger>;
+  /** Skill list per session: sessionId -> skills available in that session's cwd */
+  sessionSkills: Map<string, Skill[]>;
 }
 
 // Actions
@@ -51,6 +61,9 @@ type Action =
   | { type: 'PERMISSION_RESOLVED'; sessionId: string }
   | { type: 'PENDING_QUESTION'; sessionId: string; toolUseId: string; question: { question: string; header?: string; options?: { label: string; description?: string }[] } }
   | { type: 'QUESTION_RESOLVED'; sessionId: string; toolUseId: string }
+  | { type: 'PENDING_PLAN'; sessionId: string; toolUseId: string; plan: string; messageId: string }
+  | { type: 'PLAN_RESOLVED'; sessionId: string; toolUseId: string }
+  | { type: 'SKILLS_LIST'; sessionId: string; skills: Skill[] }
   | { type: 'TOOL_RESULT'; sessionId: string; toolUseId: string; result: ToolResultInfo }
   | { type: 'DEBUG_LOG'; sessionId: string; entry: DebugLogEntry }
   | { type: 'WAKEUP_SCHEDULED'; sessionId: string; wakeup: PendingWakeup }
@@ -329,6 +342,28 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, pendingQuestions: pq };
     }
 
+    case 'PENDING_PLAN': {
+      const pp = new Map(state.pendingPlans);
+      pp.set(action.sessionId, {
+        toolUseId: action.toolUseId,
+        plan: action.plan,
+        messageId: action.messageId,
+      });
+      return { ...state, pendingPlans: pp };
+    }
+
+    case 'PLAN_RESOLVED': {
+      const pp = new Map(state.pendingPlans);
+      pp.delete(action.sessionId);
+      return { ...state, pendingPlans: pp };
+    }
+
+    case 'SKILLS_LIST': {
+      const ss = new Map(state.sessionSkills);
+      ss.set(action.sessionId, action.skills);
+      return { ...state, sessionSkills: ss };
+    }
+
     case 'TOOL_RESULT': {
       return {
         ...state,
@@ -441,7 +476,10 @@ function reducer(state: AppState, action: Action): AppState {
 interface SessionContextValue {
   state: AppState;
   createSession: (config: SessionConfig) => void;
-  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[]) => void;
+  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean) => void;
+  respondToPlan: (sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => void;
+  refreshSkills: (sessionId: string) => void;
+  clearSession: (sessionId: string) => void;
   destroySession: (sessionId: string) => void;
   interruptSession: (sessionId: string) => void;
   compactSession: (sessionId: string) => void;
@@ -463,6 +501,7 @@ interface SessionContextValue {
   respondToQuestion: (sessionId: string, toolUseId: string, answer: string) => void;
   dequeueMessage: (sessionId: string, index: number) => void;
   cancelWakeup: (sessionId: string) => void;
+  applyClaudeMdCandidate: (sessionId: string, candidate: string) => void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -478,7 +517,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     rateLimit: null,
     pauseUntil: null,
     pendingQuestions: new Map(),
+    pendingPlans: new Map(),
     triggers: new Map(),
+    sessionSkills: new Map(),
   });
 
   const wsRef = useRef<WsClient | null>(null);
@@ -621,6 +662,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       case 'trigger_fired':
         dispatch({ type: 'TRIGGER_FIRED', trigger: msg.trigger });
         break;
+      case 'claude_md_candidate':
+        // Candidates are extracted from message content client-side; no state update needed
+        break;
+      case 'claude_md_applied':
+        // Apply confirmation — button disables locally, no state update needed
+        break;
+      case 'pending_plan':
+        dispatch({ type: 'PENDING_PLAN', sessionId: msg.sessionId, toolUseId: msg.toolUseId, plan: msg.plan, messageId: msg.messageId });
+        break;
+      case 'plan_resolved':
+        dispatch({ type: 'PLAN_RESOLVED', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
+        break;
+      case 'skills_list':
+        dispatch({ type: 'SKILLS_LIST', sessionId: msg.sessionId, skills: msg.skills });
+        break;
       case 'discovered_sessions':
         dispatch({ type: 'DISCOVERED_SESSIONS', sessions: msg.sessions });
         break;
@@ -647,8 +703,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'create_session', config });
   }, []);
 
-  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[]) => {
-    wsRef.current?.send({ type: 'send_message', sessionId, message, images });
+  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean) => {
+    wsRef.current?.send({ type: 'send_message', sessionId, message, images, planMode });
+  }, []);
+
+  const respondToPlanFn = useCallback((sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => {
+    wsRef.current?.send({ type: 'plan_response', sessionId, toolUseId, decision, feedback });
+  }, []);
+
+  const refreshSkillsFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'list_skills', sessionId });
+  }, []);
+
+  const clearSessionFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'clear_session', sessionId });
   }, []);
 
   const destroySession = useCallback((sessionId: string) => {
@@ -737,6 +805,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'cancel_wakeup', sessionId });
   }, []);
 
+  const applyClaudeMdCandidateFn = useCallback((sessionId: string, candidate: string) => {
+    wsRef.current?.send({ type: 'apply_claude_md_candidate', sessionId, candidate });
+  }, []);
+
   return (
     <SessionContext.Provider value={{
       state,
@@ -763,6 +835,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       respondToQuestion: respondToQuestionFn,
       dequeueMessage: dequeueMessageFn,
       cancelWakeup: cancelWakeupFn,
+      applyClaudeMdCandidate: applyClaudeMdCandidateFn,
+      respondToPlan: respondToPlanFn,
+      refreshSkills: refreshSkillsFn,
+      clearSession: clearSessionFn,
     }}>
       {children}
     </SessionContext.Provider>

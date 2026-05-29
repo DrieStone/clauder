@@ -11,6 +11,8 @@ export interface SessionConfig {
   name: string;
   cwd: string;
   model?: string;
+  /** Marks the singleton scratch session. Auto-created if missing; can be cleared but not deleted; hidden from main session list. */
+  isScratch?: boolean;
   allowedTools?: string[];
   systemPrompt?: string;
   effort?: EffortLevel;
@@ -69,9 +71,19 @@ export interface ImageAttachment {
   mimeType: string;   // image/png, image/jpeg, image/gif, image/webp
 }
 
+export interface Skill {
+  /** Command name without leading slash, e.g. "simplify" */
+  name: string;
+  /** Short human-readable description (first line of .md for project skills) */
+  description: string;
+  source: 'builtin' | 'project';
+}
+
 export interface QueuedMessage {
   text: string;
   images?: ImageAttachment[];
+  /** True if this message was injected programmatically (trigger, wakeup, etc.) rather than typed by the user. */
+  internal?: boolean;
 }
 
 export interface UIMessage {
