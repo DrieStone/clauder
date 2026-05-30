@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { ToolUseInfo } from '@clauder/shared';
 import { summarizeToolUse } from './MessageBubble';
 import { useSessions } from '../context/SessionContext';
+import { FileDiffView } from './FileDiffView';
+import { WriteFileView } from './WriteFileView';
 
 interface ToolUseAccordionProps {
   tool: ToolUseInfo;
@@ -61,13 +63,65 @@ export function ToolUseAccordion({ tool, sessionId }: ToolUseAccordionProps) {
             )
           ) : (
             <>
-              {/* Standard tool: Input */}
-              <div>
-                <div className="text-[10px] text-gray-500 mb-0.5">Input</div>
-                <pre className="text-[11px] text-gray-300 bg-gray-900 rounded p-1.5 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-all">
-                  {JSON.stringify(tool.input, null, 2)}
-                </pre>
-              </div>
+              {/* File-aware view for Edit / MultiEdit / Write — falls back to JSON if input is malformed */}
+              {(() => {
+                const input = tool.input as Record<string, unknown>;
+                if (tool.name === 'Edit') {
+                  const file_path = input.file_path as string | undefined;
+                  const old_string = input.old_string as string | undefined;
+                  const new_string = input.new_string as string | undefined;
+                  if (file_path && typeof old_string === 'string' && typeof new_string === 'string') {
+                    return (
+                      <div>
+                        <div className="text-[10px] text-gray-500 mb-0.5">Diff</div>
+                        <FileDiffView filePath={file_path} oldText={old_string} newText={new_string} />
+                      </div>
+                    );
+                  }
+                }
+                if (tool.name === 'MultiEdit') {
+                  const file_path = input.file_path as string | undefined;
+                  const edits = input.edits as Array<{ old_string?: string; new_string?: string }> | undefined;
+                  if (file_path && Array.isArray(edits)) {
+                    return (
+                      <div>
+                        <div className="text-[10px] text-gray-500 mb-0.5 font-mono">Diff · {file_path}</div>
+                        <div className="space-y-2">
+                          {edits.map((edit, i) => (
+                            <FileDiffView
+                              key={i}
+                              filePath={`Edit ${i + 1} of ${edits.length}`}
+                              oldText={edit.old_string ?? ''}
+                              newText={edit.new_string ?? ''}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+                }
+                if (tool.name === 'Write') {
+                  const file_path = input.file_path as string | undefined;
+                  const content = input.content as string | undefined;
+                  if (file_path && typeof content === 'string') {
+                    return (
+                      <div>
+                        <div className="text-[10px] text-gray-500 mb-0.5">Write</div>
+                        <WriteFileView filePath={file_path} content={content} />
+                      </div>
+                    );
+                  }
+                }
+                // Fallback: raw JSON for any tool not handled above (or malformed file-tool input)
+                return (
+                  <div>
+                    <div className="text-[10px] text-gray-500 mb-0.5">Input</div>
+                    <pre className="text-[11px] text-gray-300 bg-gray-900 rounded p-1.5 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-all">
+                      {JSON.stringify(tool.input, null, 2)}
+                    </pre>
+                  </div>
+                );
+              })()}
               {/* Standard tool: Result */}
               <div>
                 <div className="text-[10px] text-gray-500 mb-0.5">
