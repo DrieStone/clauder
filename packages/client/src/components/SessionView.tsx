@@ -82,11 +82,13 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
     ? Math.min(100, Math.round((session.contextUsage.inputTokens / session.contextUsage.contextWindow) * 100))
     : null;
 
-  // Only show active sessions (working or active in last hour) in tabs, sorted alphabetically
+  // Only show active sessions (working or active in last hour) in tabs, sorted alphabetically.
+  // Scratch is pulled out so it always appears first regardless of activity.
   const ONE_HOUR_MS = 60 * 60 * 1000;
   const now = Date.now();
+  const scratchSession = allSessions.find(s => s.config.isScratch);
   const sortedSessions = allSessions
-    .filter(s => s.id === session.id || s.status === 'working' || (now - new Date(s.lastActiveAt).getTime()) < ONE_HOUR_MS)
+    .filter(s => !s.config.isScratch && (s.id === session.id || s.status === 'working' || (now - new Date(s.lastActiveAt).getTime()) < ONE_HOUR_MS))
     .sort((a, b) => a.config.name.localeCompare(b.config.name));
 
   return (
@@ -99,6 +101,29 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
         >
           &larr;
         </button>
+        {/* Scratch tab — always present, regardless of activity */}
+        {scratchSession && (
+          <button
+            key={scratchSession.id}
+            onClick={() => onSwitchSession(scratchSession.id)}
+            title="Scratch (Cmd/Ctrl+Shift+S)"
+            className={`px-3 py-2 text-xs font-medium transition-colors shrink-0 flex items-center gap-1.5 border-b-2 border-r border-r-gray-800 ${
+              scratchSession.id === session.id
+                ? 'text-amber-300 border-b-amber-400'
+                : 'text-amber-500 hover:text-amber-300 border-b-transparent'
+            }`}
+          >
+            <span>📝</span>
+            {scratchSession.status === 'working' && (
+              <span className="flex gap-0.5 shrink-0">
+                <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:0ms]" />
+                <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:150ms]" />
+                <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:300ms]" />
+              </span>
+            )}
+            <span>Scratch</span>
+          </button>
+        )}
         {sortedSessions.map((s) => (
           <button
             key={s.id}

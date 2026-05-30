@@ -6,7 +6,6 @@ import { SessionBrowser } from './SessionBrowser';
 import { PauseControls } from './PauseBar';
 import { SchedulerModal } from './SchedulerModal';
 import { NotificationToggle } from './NotificationToggle';
-import { getScratchSession, getNonScratchSessions } from '../lib/sessions';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const THIRTY_SIX_HOURS_MS = 36 * 60 * 60 * 1000;
@@ -32,9 +31,9 @@ export function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  // Scratch session gets its own pinned section above all tiers
-  const scratchSession = getScratchSession(state.sessions);
-  const sessions = getNonScratchSessions(state.sessions);
+  // Scratch session is treated as a normal session card in the Active tier;
+  // its visual distinction (amber border + badge) is handled in SessionCard.
+  const sessions = Array.from(state.sessions.values());
   const now = Date.now();
 
   const byRecent = (a: typeof sessions[0], b: typeof sessions[0]) =>
@@ -43,10 +42,11 @@ export function Dashboard() {
   const byName = (a: typeof sessions[0], b: typeof sessions[0]) =>
     a.config.name.localeCompare(b.config.name);
 
-  // Active sessions sorted alphabetically so they don't jump around
-  const hotSessions = sessions.filter(s => classifySession(s, now) === 'hot').sort(byName);
-  const warmSessions = sessions.filter(s => classifySession(s, now) === 'warm').sort(byRecent);
-  const historySessions = sessions.filter(s => classifySession(s, now) === 'history').sort(byRecent);
+  // Active sessions sorted alphabetically so they don't jump around.
+  // Scratch is always shown in Active regardless of its lastActiveAt age.
+  const hotSessions = sessions.filter(s => s.config.isScratch || classifySession(s, now) === 'hot').sort(byName);
+  const warmSessions = sessions.filter(s => !s.config.isScratch && classifySession(s, now) === 'warm').sort(byRecent);
+  const historySessions = sessions.filter(s => !s.config.isScratch && classifySession(s, now) === 'history').sort(byRecent);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -101,24 +101,6 @@ export function Dashboard() {
           </div>
         ) : (
           <div className="space-y-8">
-            {/* Scratch: always pinned at the top, single card. */}
-            {scratchSession && (
-              <section>
-                <h2 className="text-xs font-medium text-amber-500/80 uppercase tracking-wider mb-3 flex items-center gap-2">
-                  <span>Scratch</span>
-                  <span className="text-[10px] text-gray-500 normal-case tracking-normal">always available · Cmd/Ctrl+Shift+S to jump</span>
-                </h2>
-                <div className="grid grid-cols-1 active-grid gap-3">
-                  <SessionCard
-                    key={scratchSession.id}
-                    session={scratchSession}
-                    tier="warm"
-                    onClick={() => setActiveSession(scratchSession.id)}
-                  />
-                </div>
-              </section>
-            )}
-
             {/* Active: compact cards sorted alphabetically */}
             {hotSessions.length > 0 && (
               <section>
