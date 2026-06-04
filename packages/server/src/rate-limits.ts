@@ -1,4 +1,4 @@
-import type { RateLimitInfo } from '@clauder/shared';
+import type { RateLimitInfo, RateLimitWindow } from '@clauder/shared';
 
 const BUDGET_LIMIT = 5.0; // $5 default — configurable later
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours
@@ -10,6 +10,20 @@ interface CostEvent {
 
 const costLog: CostEvent[] = [];
 let listener: ((info: RateLimitInfo) => void) | null = null;
+
+// Real subscription usage parsed from the CLI's rate_limit_event. Null until the first
+// event arrives. When set, the UI prefers these over the cost proxy so the bar matches
+// the Claude app exactly.
+let sessionWindow: RateLimitWindow | null = null;
+let weeklyWindow: RateLimitWindow | null = null;
+
+/** Record the real subscription windows from a rate_limit_event. Notifies the listener so
+ *  the update broadcasts to all clients. */
+export function recordSubscriptionLimits(windows: { session?: RateLimitWindow | null; weekly?: RateLimitWindow | null }): void {
+  if (windows.session !== undefined) sessionWindow = windows.session;
+  if (windows.weekly !== undefined) weeklyWindow = windows.weekly;
+  listener?.(getRateLimitInfo());
+}
 
 function prune(): void {
   const cutoff = Date.now() - WINDOW_MS;
@@ -39,7 +53,16 @@ export function getRateLimitInfo(): RateLimitInfo {
     budgetUsed,
     windowResetAt,
     updatedAt: new Date().toISOString(),
+    session: sessionWindow,
+    weekly: weeklyWindow,
   };
+}
+
+/** Manually clear the cost log — used to zero the usage bar when the real
+ *  subscription period rolls over (the cost proxy can't see the true reset boundary). */
+export function resetRateLimit(): void {
+  costLog.length = 0;
+  listener?.(getRateLimitInfo());
 }
 
 /** Register callback for when rate limit info changes */

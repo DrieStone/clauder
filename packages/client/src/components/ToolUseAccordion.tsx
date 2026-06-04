@@ -13,7 +13,7 @@ interface ToolUseAccordionProps {
 export function ToolUseAccordion({ tool, sessionId }: ToolUseAccordionProps) {
   const [open, setOpen] = useState(false);
   const [answered, setAnswered] = useState(false);
-  const { sendMessage } = useSessions();
+  const { respondToQuestion } = useSessions();
   const desc = summarizeToolUse(tool);
 
   const isQuestion = tool.name === 'AskUserQuestion';
@@ -29,11 +29,11 @@ export function ToolUseAccordion({ tool, sessionId }: ToolUseAccordionProps) {
 
   const handleAnswer = (answer: string) => {
     setAnswered(true);
-    // Send the answer as a follow-up user message — the CLI auto-failed the tool,
-    // so we reply in the next turn instead
+    // Deliver via respondToQuestion (not sendMessage): it jumps the queue so the answer is
+    // processed next even if the session is mid-work, instead of being buried at the back.
     const header = firstQuestion?.header ? `[${firstQuestion.header}] ` : '';
     const questionRef = firstQuestion?.question ? `Re: "${firstQuestion.question}" — ` : '';
-    sendMessage(sessionId, `${header}${questionRef}${answer}`);
+    respondToQuestion(sessionId, tool.id, `${header}${questionRef}${answer}`);
   };
 
   return (

@@ -12,6 +12,7 @@ import { EffortSelector } from './EffortSelector';
 import { WakeupBanner } from './WakeupBanner';
 import { WatchPanel } from './WatchPanel';
 import { PlanBanner } from './PlanBanner';
+import { RateLimitBar } from './RateLimitBar';
 
 interface SessionViewProps {
   session: SessionState;
@@ -181,7 +182,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
                 {session.config.name}
               </h2>
             )}
-            <StatusBadge status={session.status} />
+            <StatusBadge status={session.status} waitingFor={session.waitingFor} />
             {session.origin === 'vscode' && (
               <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
             )}
@@ -228,6 +229,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             </div>
           )}
         </div>
+        <RateLimitBar />
         {contextPct !== null && (
           <div className="flex items-center gap-1.5">
             <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">

@@ -8,16 +8,19 @@ const TRIGGERS_FILE = path.join(os.homedir(), '.clauder', 'triggers.json');
 
 type FireFn = (sessionId: string, message: string) => void;
 type BroadcastFn = (event: 'created' | 'updated' | 'deleted' | 'fired', trigger: Trigger, triggerId?: string) => void;
+type SessionExistsFn = (sessionId: string) => boolean;
 
 export class TriggerManager {
   private triggers = new Map<string, Trigger>();
   private timers = new Map<string, NodeJS.Timeout>();
   private fireFn: FireFn;
   private broadcastFn: BroadcastFn;
+  private sessionExists: SessionExistsFn;
 
-  constructor(fireFn: FireFn, broadcastFn: BroadcastFn) {
+  constructor(fireFn: FireFn, broadcastFn: BroadcastFn, sessionExists: SessionExistsFn = () => true) {
     this.fireFn = fireFn;
     this.broadcastFn = broadcastFn;
+    this.sessionExists = sessionExists;
   }
 
   load(): void {
@@ -39,7 +42,10 @@ export class TriggerManager {
     try {
       const dir = path.dirname(TRIGGERS_FILE);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(TRIGGERS_FILE, JSON.stringify([...this.triggers.values()], null, 2));
+      // Atomic write: temp sibling + rename, so a crash mid-write can't truncate triggers.json.
+      const tmp = `${TRIGGERS_FILE}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify([...this.triggers.values()], null, 2));
+      fs.renameSync(tmp, TRIGGERS_FILE);
     } catch (err) {
       console.error('[TriggerManager] Failed to save:', err);
     }
@@ -70,6 +76,23 @@ export class TriggerManager {
   private fire(triggerId: string): void {
     const t = this.triggers.get(triggerId);
     if (!t || !t.enabled) return;
+
+    // If the target session is gone, don't fire into the void. A recurring trigger would
+    // otherwise log a "session not found" error every interval forever; disable it instead.
+    // A one-shot for a dead session is simply dropped.
+    if (!this.sessionExists(t.sessionId)) {
+      console.warn(`[TriggerManager] Session ${t.sessionId} gone — ${t.schedule.type === 'recurring' ? 'disabling' : 'dropping'} trigger "${t.description}"`);
+      this.timers.delete(t.id);
+      if (t.schedule.type === 'once') {
+        this.triggers.delete(t.id);
+        this.broadcastFn('deleted', t);
+      } else {
+        t.enabled = false;
+        this.broadcastFn('updated', t);
+      }
+      this.save();
+      return;
+    }
 
     t.lastFiredAt = new Date().toISOString();
     console.log(`[TriggerManager] Firing "${t.description}" → session ${t.sessionId}`);

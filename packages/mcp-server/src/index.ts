@@ -21,6 +21,15 @@ import WebSocket from 'ws';
 const CLAUDER_URL = process.env.CLAUDER_URL || 'http://localhost:3001';
 const CONTROLLER_ID = process.env.CLAUDER_CONTROLLER_ID || '';
 
+function formatResetsIn(resetsAt: string): string {
+  const diffMs = new Date(resetsAt).getTime() - Date.now();
+  if (diffMs <= 0) return 'now';
+  const totalSec = Math.floor(diffMs / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
 const server = new Server(
   { name: 'clauder', version: '0.1.0' },
   { capabilities: { tools: {} } },
@@ -200,6 +209,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['watchId'],
       },
     },
+    {
+      name: 'get_rate_limit',
+      description:
+        'Get the current Claude subscription usage for the active session window. ' +
+        'Returns status ("allowed" | "allowed_warning" | "rejected"), the reset timestamp, ' +
+        'and utilization (0–100, or null if below the reporting threshold ~90%). ' +
+        'Use this before dispatching expensive work to check headroom, and to get the exact ' +
+        'resetsAt time so you can schedule a wakeup and resume after the window rolls over.',
+      inputSchema: { type: 'object', properties: {} },
+    },
   ],
 }));
 
@@ -372,6 +391,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{ type: 'text', text: `Watch updated. Next fire: ${trigger.schedule.nextAt}` }],
         };
+      }
+
+      case 'get_rate_limit': {
+        const res = await fetch(`${CLAUDER_URL}/api/rate-limit`);
+        if (!res.ok) throw new Error(`Failed to get rate limit: ${res.status}`);
+        const info = await res.json() as any;
+        // Surface the real subscription windows when available; fall back to the cost proxy summary.
+        const session = info.session;
+        const weekly = info.weekly;
+        const result = {
+          // Real subscription data (null until first rate_limit_event fires at ~90% usage)
+          session: session ? {
+            status: session.status,
+            usedPercent: session.usedPercent,  // null = below reporting threshold
+            resetsAt: session.resetsAt,
+            resetsIn: session.resetsAt ? formatResetsIn(session.resetsAt) : null,
+          } : null,
+          weekly: weekly ? {
+            status: weekly.status,
+            usedPercent: weekly.usedPercent,
+            resetsAt: weekly.resetsAt,
+            resetsIn: weekly.resetsAt ? formatResetsIn(weekly.resetsAt) : null,
+          } : null,
+          // Cost proxy (always available, less accurate)
+          proxy: {
+            budgetUsed: info.budgetUsed,
+            budgetLimit: info.budgetLimit,
+            windowResetAt: info.windowResetAt,
+          },
+        };
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 
       default:

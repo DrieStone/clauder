@@ -1,4 +1,5 @@
 import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from './session.js';
+import type { ProjectRun, RunBudget } from './project-run.js';
 
 // Browser -> Server
 export type WsInboundMessage =
@@ -13,6 +14,10 @@ export type WsInboundMessage =
   | { type: 'resume_discovered'; sdkSessionId: string; name: string; projectPath: string }
   | { type: 'pause_sessions'; pauseUntil: string }
   | { type: 'resume_sessions' }
+  | { type: 'reset_rate_limit' }
+  | { type: 'create_project_run'; name: string; repoPath: string; goal: string; budget?: RunBudget; executorModel?: string }
+  | { type: 'approve_project_run'; runId: string; budget?: RunBudget; verifyCommands?: string[] }
+  | { type: 'cancel_project_run'; runId: string }
   | { type: 'set_permission_mode'; sessionId: string; mode: PermissionMode }
   | { type: 'rename_session'; sessionId: string; newName: string }
   | { type: 'update_cwd'; sessionId: string; cwd: string }
@@ -33,7 +38,7 @@ export type WsOutboundMessage =
   | { type: 'sessions_list'; sessions: SessionState[] }
   | { type: 'session_created'; session: SessionState }
   | { type: 'session_destroyed'; sessionId: string }
-  | { type: 'state_change'; sessionId: string; status: string; error?: string }
+  | { type: 'state_change'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
   | { type: 'assistant_message'; sessionId: string; messageId: string; text: string; toolUses?: { id: string; name: string; input: Record<string, unknown> }[] }
   | { type: 'assistant_message_stream'; sessionId: string; messageId: string; delta: string }
   | { type: 'user_message_echo'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[] }
@@ -67,4 +72,7 @@ export type WsOutboundMessage =
   | { type: 'pending_plan'; sessionId: string; toolUseId: string; plan: string; messageId: string }
   | { type: 'plan_resolved'; sessionId: string; toolUseId: string }
   | { type: 'skills_list'; sessionId: string; skills: Skill[] }
+  | { type: 'project_runs_snapshot'; runs: ProjectRun[] }
+  | { type: 'project_run_update'; run: ProjectRun }
+  | { type: 'project_run_removed'; runId: string }
   | { type: 'error'; sessionId: string; message: string };

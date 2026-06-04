@@ -42,11 +42,17 @@ export function Dashboard() {
   const byName = (a: typeof sessions[0], b: typeof sessions[0]) =>
     a.config.name.localeCompare(b.config.name);
 
-  // Active sessions sorted alphabetically so they don't jump around.
+  // Active sessions: "needs you" sessions float to the top (waitingFor set), then alphabetical.
   // Scratch is always shown in Active regardless of its lastActiveAt age.
-  const hotSessions = sessions.filter(s => s.config.isScratch || classifySession(s, now) === 'hot').sort(byName);
-  const warmSessions = sessions.filter(s => !s.config.isScratch && classifySession(s, now) === 'warm').sort(byRecent);
-  const historySessions = sessions.filter(s => !s.config.isScratch && classifySession(s, now) === 'history').sort(byRecent);
+  const byNeedsYouThenName = (a: typeof sessions[0], b: typeof sessions[0]) => {
+    const aNeeds = a.waitingFor ? 0 : 1;
+    const bNeeds = b.waitingFor ? 0 : 1;
+    if (aNeeds !== bNeeds) return aNeeds - bNeeds;
+    return a.config.name.localeCompare(b.config.name);
+  };
+  const hotSessions = sessions.filter(s => s.config.isScratch || classifySession(s, now) === 'hot' || !!s.waitingFor).sort(byNeedsYouThenName);
+  const warmSessions = sessions.filter(s => !s.config.isScratch && !s.waitingFor && classifySession(s, now) === 'warm').sort(byRecent);
+  const historySessions = sessions.filter(s => !s.config.isScratch && !s.waitingFor && classifySession(s, now) === 'history').sort(byRecent);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -69,9 +75,9 @@ export function Dashboard() {
             <button
               onClick={() => setShowScheduler(true)}
               className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition-colors"
-              title="Schedule a message to fire at a specific time"
+              title="Schedule tasks and manage overnight runs"
             >
-              Scheduler
+              Automation
             </button>
             <button
               onClick={() => setShowDiscovery(true)}
@@ -172,13 +178,7 @@ export function Dashboard() {
 
         {state.showDiscovery && <SessionBrowser />}
 
-        {showScheduler && (
-          <SchedulerModal
-            sessions={sessions}
-            triggers={Array.from(state.triggers.values())}
-            onClose={() => setShowScheduler(false)}
-          />
-        )}
+        {showScheduler && <SchedulerModal onClose={() => setShowScheduler(false)} />}
       </div>
     </div>
   );

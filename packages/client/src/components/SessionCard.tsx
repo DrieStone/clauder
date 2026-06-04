@@ -190,12 +190,16 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
         isWorking ? 'border-amber-700/60' : isScratch ? 'border-amber-800/60' : 'border-gray-800'
       }`}
     >
-      {/* Working progress bar */}
-      {isWorking && (
+      {/* Needs-you band — replaces the working bar when waiting for input */}
+      {session.waitingFor ? (
+        <div className="h-0.5 bg-amber-400/60 overflow-hidden">
+          <div className="h-full bg-amber-400 animate-pulse" />
+        </div>
+      ) : isWorking ? (
         <div className="h-0.5 bg-gray-800 overflow-hidden">
           <div className="h-full bg-amber-500 animate-progress" />
         </div>
-      )}
+      ) : null}
 
       {/* Header - clickable to expand */}
       <button
@@ -234,7 +238,7 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
                 {session.summary && <SummaryTooltip summary={session.summary} />}
               </>
             )}
-            <StatusBadge status={session.status} />
+            <StatusBadge status={session.status} waitingFor={session.waitingFor} />
             {session.origin === 'vscode' && (
               <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
             )}
@@ -433,7 +437,7 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
                 {session.summary && <SummaryTooltip summary={session.summary} />}
               </>
             )}
-            <StatusBadge status={session.status} />
+            <StatusBadge status={session.status} waitingFor={session.waitingFor} />
             {session.origin === 'vscode' && (
               <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
             )}

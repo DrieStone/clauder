@@ -281,8 +281,17 @@ export class SessionManager {
   }
 
   async destroyAll(): Promise<void> {
-    const ids = Array.from(this.sessions.keys());
+    const ids = Array.from(this.sessions.keys()).filter(
+      id => !this.sessions.get(id)?.config.isScratch
+    );
     await Promise.all(ids.map(id => this.destroySession(id)));
+  }
+
+  /** Kill all child processes without modifying session state or re-persisting.
+   *  Use this at shutdown so persistNow()'s save isn't overwritten by deletions. */
+  async terminateAll(): Promise<void> {
+    const sessions = Array.from(this.sessions.values());
+    await Promise.all(sessions.map(s => s.destroy()));
   }
 
   // ─── Pause / Resume ─────────────────────────────────────────────────────────

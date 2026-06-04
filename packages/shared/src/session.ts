@@ -24,6 +24,11 @@ export interface SessionConfig {
   /** When true, this session is loaded with the Clauder MCP server,
    * giving it tools to orchestrate other sessions. */
   controllerMode?: boolean;
+  /** How long to wait for a human to answer an AskUserQuestion before the session
+   *  proceeds on its own (making the best decision and noting the assumption).
+   *  Defaults to 300 (5 min) for interactive sessions; an overnight/autonomous runner
+   *  sets this low so it decides quickly instead of stalling. */
+  questionTimeoutSeconds?: number;
 }
 
 export interface DiscoveredSession {
@@ -51,6 +56,9 @@ export interface SessionState {
   sdkSessionId: string | null;
   totalCostUsd: number;
   error: string | null;
+  /** What the session is currently waiting for, if anything. Set when a question/permission
+   *  is pending; cleared when resolved. Drives the "Needs you" UI indicator. */
+  waitingFor: string | null;
   currentToolActivity: ToolActivity | null;
   contextUsage: ContextUsage | null;
   queuedMessages: QueuedMessage[];
@@ -168,6 +176,17 @@ export interface PendingWakeup {
   toolUseId: string;
 }
 
+/** One real Claude subscription usage window, parsed from the CLI's rate_limit_event. */
+export interface RateLimitWindow {
+  /** Percent of the window's limit used, 0–100. Null means the event fired but carried no
+   *  utilization data (fresh window or rejected state) — distinct from "known to be 0%". */
+  usedPercent: number | null;
+  /** ISO timestamp when this window resets. */
+  resetsAt: string;
+  /** Raw status from the event: "allowed" | "allowed_warning" | "rejected" */
+  status: string;
+}
+
 export interface RateLimitInfo {
   /** Budget ceiling for the rolling window (e.g. 5.00) */
   budgetLimit: number;
@@ -177,4 +196,9 @@ export interface RateLimitInfo {
   windowResetAt: string | null;
   /** ISO timestamp of when this was last computed */
   updatedAt: string;
+  /** Real subscription usage from the CLI's rate_limit_event. Null until the first event
+   *  arrives (only present for subscribers, after the first API response). When present,
+   *  the UI shows these real numbers instead of the cost proxy so it matches the Claude app. */
+  session?: RateLimitWindow | null;   // five_hour — the "Current session" limit
+  weekly?: RateLimitWindow | null;    // seven_day — the weekly limit
 }

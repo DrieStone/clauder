@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import { execFile, spawn as spawnChild } from 'child_process';
 import type { SessionManager } from './session-manager.js';
 import type { TriggerManager } from './triggers.js';
+import type { ProjectRunner } from './project-runner.js';
+import { getRateLimitInfo } from './rate-limits.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,12 +21,20 @@ function resolveSafePath(cwd: string, relativePath: string): string | null {
   return resolved;
 }
 
-export function createApp(sessionManager: SessionManager, getTriggers: () => TriggerManager) {
+export function createApp(sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => ProjectRunner) {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  app.get('/api/rate-limit', (_req, res) => {
+    res.json(getRateLimitInfo());
+  });
+
+  app.get('/api/project-runs', (_req, res) => {
+    res.json(getProjectRunner().list());
   });
 
   app.get('/api/sessions', (_req, res) => {

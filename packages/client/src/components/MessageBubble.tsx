@@ -39,27 +39,31 @@ function extractCandidates(content: string): string[] {
 }
 
 function ClaudeMdCandidates({ candidates, sessionId }: { candidates: string[]; sessionId: string }) {
-  const { applyClaudeMdCandidate } = useSessions();
-  const [applied, setApplied] = useState<Set<string>>(new Set());
+  const { applyClaudeMdCandidate, state } = useSessions();
+  const [clicked, setClicked] = useState<Set<string>>(new Set());
 
   return (
     <div className="mt-2 flex flex-col gap-1">
-      {candidates.map((c, i) => (
-        <div key={i} className="flex items-start gap-2 bg-yellow-950/40 border border-yellow-700/50 rounded px-2 py-1 text-xs">
-          <span className="text-yellow-400 font-medium shrink-0">CLAUDE.md</span>
-          <span className="text-yellow-100 flex-1">{c}</span>
-          <button
-            disabled={applied.has(c)}
-            onClick={() => {
-              applyClaudeMdCandidate(sessionId, c);
-              setApplied(prev => new Set(prev).add(c));
-            }}
-            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-yellow-700 hover:bg-yellow-600 text-white disabled:opacity-40 disabled:cursor-default transition-colors"
-          >
-            {applied.has(c) ? 'Applied' : 'Apply'}
-          </button>
-        </div>
-      ))}
+      {candidates.map((c, i) => {
+        // Candidates are auto-applied server-side; the button is just a manual fallback.
+        const applied = state.appliedClaudeMd.has(c.trim()) || clicked.has(c);
+        return (
+          <div key={i} className="flex items-start gap-2 bg-yellow-950/40 border border-yellow-700/50 rounded px-2 py-1 text-xs">
+            <span className="text-yellow-400 font-medium shrink-0">CLAUDE.md</span>
+            <span className="text-yellow-100 flex-1">{c}</span>
+            <button
+              disabled={applied}
+              onClick={() => {
+                applyClaudeMdCandidate(sessionId, c);
+                setClicked(prev => new Set(prev).add(c));
+              }}
+              className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-yellow-700 hover:bg-yellow-600 text-white disabled:opacity-40 disabled:cursor-default transition-colors"
+            >
+              {applied ? 'Applied' : 'Apply'}
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

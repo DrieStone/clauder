@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget } from '@clauder/shared';
 import { WsClient } from '../lib/ws-client';
 import { notify } from '../lib/notifications';
 
@@ -34,6 +34,11 @@ interface AppState {
   triggers: Map<string, Trigger>;
   /** Skill list per session: sessionId -> skills available in that session's cwd */
   sessionSkills: Map<string, Skill[]>;
+  /** CLAUDE.md candidates already written (auto-applied by the server or applied manually),
+   *  by candidate text — so the banner shows "Applied" without a click. */
+  appliedClaudeMd: Set<string>;
+  /** Overnight Project Runner runs, keyed by run id. */
+  projectRuns: Map<string, ProjectRun>;
 }
 
 // Actions
@@ -41,7 +46,7 @@ type Action =
   | { type: 'SESSIONS_LIST'; sessions: SessionState[] }
   | { type: 'SESSION_CREATED'; session: SessionState }
   | { type: 'SESSION_DESTROYED'; sessionId: string }
-  | { type: 'STATE_CHANGE'; sessionId: string; status: string; error?: string }
+  | { type: 'STATE_CHANGE'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
   | { type: 'ASSISTANT_MESSAGE'; sessionId: string; messageId: string; text: string; toolUses?: any[] }
   | { type: 'ASSISTANT_STREAM_DELTA'; sessionId: string; messageId: string; delta: string }
   | { type: 'USER_MESSAGE_ECHO'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[] }
@@ -50,6 +55,10 @@ type Action =
   | { type: 'CONTEXT_UPDATE'; sessionId: string; contextUsage: { inputTokens: number; outputTokens: number; contextWindow: number } }
   | { type: 'QUEUE_UPDATE'; sessionId: string; queue: QueuedMessage[] }
   | { type: 'RATE_LIMIT_UPDATE'; rateLimit: RateLimitInfo }
+  | { type: 'CLAUDE_MD_APPLIED'; candidate: string }
+  | { type: 'PROJECT_RUNS_SNAPSHOT'; runs: ProjectRun[] }
+  | { type: 'PROJECT_RUN_UPDATE'; run: ProjectRun }
+  | { type: 'PROJECT_RUN_REMOVED'; runId: string }
   | { type: 'PAUSE_UPDATE'; pauseUntil: string | null }
   | { type: 'PERMISSION_MODE_CHANGE'; sessionId: string; mode: PermissionMode }
   | { type: 'SESSION_RENAMED'; sessionId: string; newName: string }
@@ -123,6 +132,7 @@ function reducer(state: AppState, action: Action): AppState {
           ...s,
           status: action.status as SessionState['status'],
           error: action.error || null,
+          waitingFor: action.waitingFor !== undefined ? (action.waitingFor ?? null) : s.waitingFor,
           currentToolActivity: action.status === 'idle' ? null : s.currentToolActivity,
           lastActiveAt: new Date().toISOString(),
         })),
@@ -240,6 +250,27 @@ function reducer(state: AppState, action: Action): AppState {
 
     case 'RATE_LIMIT_UPDATE':
       return { ...state, rateLimit: action.rateLimit };
+
+    case 'CLAUDE_MD_APPLIED':
+      return { ...state, appliedClaudeMd: new Set(state.appliedClaudeMd).add(action.candidate) };
+
+    case 'PROJECT_RUNS_SNAPSHOT': {
+      const projectRuns = new Map<string, ProjectRun>();
+      for (const run of action.runs) projectRuns.set(run.id, run);
+      return { ...state, projectRuns };
+    }
+
+    case 'PROJECT_RUN_UPDATE': {
+      const projectRuns = new Map(state.projectRuns);
+      projectRuns.set(action.run.id, action.run);
+      return { ...state, projectRuns };
+    }
+
+    case 'PROJECT_RUN_REMOVED': {
+      const projectRuns = new Map(state.projectRuns);
+      projectRuns.delete(action.runId);
+      return { ...state, projectRuns };
+    }
 
     case 'PAUSE_UPDATE':
       return { ...state, pauseUntil: action.pauseUntil };
@@ -496,6 +527,10 @@ interface SessionContextValue {
   setShowDiscovery: (show: boolean) => void;
   pauseSessions: (pauseUntil: string) => void;
   resumeSessions: () => void;
+  resetRateLimit: () => void;
+  createProjectRun: (input: { name: string; repoPath: string; goal: string; budget?: RunBudget; executorModel?: string }) => void;
+  approveProjectRun: (runId: string, opts?: { budget?: RunBudget; verifyCommands?: string[] }) => void;
+  cancelProjectRun: (runId: string) => void;
   updateLastActive: (sessionId: string) => void;
   setPermissionMode: (sessionId: string, mode: PermissionMode) => void;
   renameSession: (sessionId: string, newName: string) => void;
@@ -526,6 +561,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     pendingPlans: new Map(),
     triggers: new Map(),
     sessionSkills: new Map(),
+    appliedClaudeMd: new Set<string>(),
+    projectRuns: new Map(),
   });
 
   const wsRef = useRef<WsClient | null>(null);
@@ -555,7 +592,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       case 'state_change': {
         const prev = prevStatusRef.current.get(msg.sessionId);
         prevStatusRef.current.set(msg.sessionId, msg.status);
-        dispatch({ type: 'STATE_CHANGE', sessionId: msg.sessionId, status: msg.status, error: msg.error });
+        dispatch({ type: 'STATE_CHANGE', sessionId: msg.sessionId, status: msg.status, error: msg.error, waitingFor: msg.waitingFor });
         // Notify on entering error state (not for repeated 'error' broadcasts)
         if (msg.status === 'error' && prev !== 'error') {
           const errText = msg.error === 'AUTH_EXPIRED'
@@ -669,7 +706,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: 'TRIGGER_FIRED', trigger: msg.trigger });
         break;
       case 'claude_md_applied':
-        // Apply confirmation — button disables locally, no state update needed
+        // Server auto-applied (or confirmed a manual apply) — mark it so the banner shows "Applied".
+        dispatch({ type: 'CLAUDE_MD_APPLIED', candidate: msg.candidate });
+        break;
+      case 'project_runs_snapshot':
+        dispatch({ type: 'PROJECT_RUNS_SNAPSHOT', runs: msg.runs });
+        break;
+      case 'project_run_update':
+        dispatch({ type: 'PROJECT_RUN_UPDATE', run: msg.run });
+        break;
+      case 'project_run_removed':
+        dispatch({ type: 'PROJECT_RUN_REMOVED', runId: msg.runId });
         break;
       case 'pending_plan':
         dispatch({ type: 'PENDING_PLAN', sessionId: msg.sessionId, toolUseId: msg.toolUseId, plan: msg.plan, messageId: msg.messageId });
@@ -763,6 +810,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'resume_sessions' });
   }, []);
 
+  const resetRateLimitFn = useCallback(() => {
+    wsRef.current?.send({ type: 'reset_rate_limit' });
+  }, []);
+
+  const createProjectRun = useCallback((input: { name: string; repoPath: string; goal: string; budget?: RunBudget; executorModel?: string }) => {
+    wsRef.current?.send({ type: 'create_project_run', ...input });
+  }, []);
+
+  const approveProjectRun = useCallback((runId: string, opts?: { budget?: RunBudget; verifyCommands?: string[] }) => {
+    wsRef.current?.send({ type: 'approve_project_run', runId, budget: opts?.budget, verifyCommands: opts?.verifyCommands });
+  }, []);
+
+  const cancelProjectRun = useCallback((runId: string) => {
+    wsRef.current?.send({ type: 'cancel_project_run', runId });
+  }, []);
+
   const updateLastActive = useCallback((sessionId: string) => {
     dispatch({ type: 'UPDATE_LAST_ACTIVE', sessionId });
   }, []);
@@ -827,6 +890,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       setShowDiscovery,
       pauseSessions: pauseSessionsFn,
       resumeSessions: resumeSessionsFn,
+      resetRateLimit: resetRateLimitFn,
+      createProjectRun,
+      approveProjectRun,
+      cancelProjectRun,
       updateLastActive,
       setPermissionMode: setPermissionModeFn,
       renameSession: renameSessionFn,

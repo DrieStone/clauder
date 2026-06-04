@@ -1,15 +1,16 @@
 import { v4 as uuid } from 'uuid';
 import { spawn } from 'child_process';
-import { existsSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import type { ChildProcess } from 'child_process';
-import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType } from '@clauder/shared';
+import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType, RateLimitWindow } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
-import { recordCostDelta } from './rate-limits.js';
+import { recordCostDelta, recordSubscriptionLimits } from './rate-limits.js';
 import { classifyTaskSwitch } from './task-classifier.js';
 import { getSkillsForCwd } from './skills.js';
+import { extractClaudeMdCandidates, applyClaudeMdCandidate } from './claude-md.js';
 
 // Walk up the directory tree from this file to find the Claude CLI binary.
 // v2.1.120+ ships a native binary at bin/claude.exe instead of cli.js.
@@ -77,6 +78,9 @@ export class ManagedSession {
   sdkSessionId: string | null = null;
   totalCostUsd = 0;
   error: string | null = null;
+  /** What this session is currently waiting on (e.g. 'question', 'permission').
+   *  Null when not waiting. Drives the "Needs you" card indicator. */
+  waitingFor: string | null = null;
   currentToolActivity: ToolActivity | null = null;
   contextUsage: ContextUsage | null = null;
   messages: UIMessage[] = [];
@@ -91,6 +95,11 @@ export class ManagedSession {
   pendingPermission: PendingPermission | null = null;
   pendingWakeup: PendingWakeup | null = null;
   private wakeupTimer: NodeJS.Timeout | null = null;
+  /** Server-side AskUserQuestion gate. Set when the model asks a question; cleared on
+   *  answer, fresh user input, or timeout (after which the session proceeds on its own).
+   *  Distinct from the client-side pendingQuestion, which drives the answer UI. */
+  pendingQuestion: { toolUseId: string; askedAt: string } | null = null;
+  private questionTimer: NodeJS.Timeout | null = null;
   /** True while a Haiku task-switch classification is in flight. Concurrent sendMessage calls queue instead of racing. */
   private pendingTaskSwitch = false;
   /** Epoch ms of last auto-compact, used as a cooldown so the classifier doesn't re-fire on dequeued messages. */
@@ -197,6 +206,7 @@ export class ManagedSession {
       sdkSessionId: this.sdkSessionId,
       totalCostUsd: this.totalCostUsd,
       error: this.error,
+      waitingFor: this.waitingFor,
       currentToolActivity: this.currentToolActivity,
       contextUsage: this.contextUsage,
       messages: this.messages,
@@ -241,28 +251,34 @@ export class ManagedSession {
     this.broadcast({ type: 'wakeup_scheduled', sessionId: this.id, wakeup: this.pendingWakeup });
   }
 
-  /** Fire the pending wakeup: send a continuation message to the session. */
+  /** Fire the pending wakeup: send a continuation message to the session.
+   *  Runs from a setTimeout callback, so the whole body is guarded — a throw here
+   *  (e.g. firing into a session being torn down) must not become an unhandled exception. */
   private fireWakeup(): void {
-    if (!this.pendingWakeup) return;
-    const wakeup = this.pendingWakeup;
-    this.pendingWakeup = null;
-    this.wakeupTimer = null;
-    console.log(`[Session ${this.id}] Wakeup firing (reason: ${wakeup.reason})`);
+    try {
+      if (!this.pendingWakeup) return;
+      const wakeup = this.pendingWakeup;
+      this.pendingWakeup = null;
+      this.wakeupTimer = null;
+      console.log(`[Session ${this.id}] Wakeup firing (reason: ${wakeup.reason})`);
 
-    // Build a continuation message. If the prompt is the autonomous-loop sentinel,
-    // Claude won't recognize it — send a generic continue with the reason for context.
-    const isSentinel = wakeup.prompt === '<<autonomous-loop-dynamic>>' || wakeup.prompt === '<<autonomous-loop>>';
-    const message = isSentinel
-      ? `[Scheduled wakeup] Continue with the task.${wakeup.reason ? ` Reason: ${wakeup.reason}` : ''}`
-      : wakeup.prompt;
+      // Build a continuation message. If the prompt is the autonomous-loop sentinel,
+      // Claude won't recognize it — send a generic continue with the reason for context.
+      const isSentinel = wakeup.prompt === '<<autonomous-loop-dynamic>>' || wakeup.prompt === '<<autonomous-loop>>';
+      const message = isSentinel
+        ? `[Scheduled wakeup] Continue with the task.${wakeup.reason ? ` Reason: ${wakeup.reason}` : ''}`
+        : wakeup.prompt;
 
-    this.broadcast({ type: 'wakeup_cleared', sessionId: this.id });
+      this.broadcast({ type: 'wakeup_cleared', sessionId: this.id });
 
-    // Send as an internal message — programmatic, not user input, so task-switch
-    // classification should skip it
-    this.sendMessage(message, [], { internal: true }).catch(err => {
-      console.error(`[Session ${this.id}] Wakeup send failed: ${err.message}`);
-    });
+      // Send as an internal message — programmatic, not user input, so task-switch
+      // classification should skip it
+      this.sendMessage(message, [], { internal: true }).catch(err => {
+        console.error(`[Session ${this.id}] Wakeup send failed: ${err.message}`);
+      });
+    } catch (err) {
+      console.error(`[Session ${this.id}] Wakeup fire failed:`, err);
+    }
   }
 
   /** Cancel a pending wakeup (user-initiated or new message). */
@@ -278,6 +294,49 @@ export class ManagedSession {
     if (this.wakeupTimer) {
       clearTimeout(this.wakeupTimer);
       this.wakeupTimer = null;
+    }
+  }
+
+  /** Arm the answer gate when the model asks a question. If no answer arrives within
+   *  the timeout, the session proceeds on its own with a best-effort default. */
+  private armQuestionTimeout(toolUseId: string): void {
+    this.clearQuestionTimer();
+    this.pendingQuestion = { toolUseId, askedAt: new Date().toISOString() };
+    this.waitingFor = 'question';
+    const seconds = this.config.questionTimeoutSeconds ?? 300;
+    this.questionTimer = setTimeout(() => this.fireQuestionTimeout(), seconds * 1000);
+    console.log(`[Session ${this.id}] Question gate armed — proceeding on its own in ${seconds}s if unanswered`);
+    this.broadcast({ type: 'state_change', sessionId: this.id, status: this.status, waitingFor: 'question' });
+  }
+
+  /** No human answer arrived in time — tell the session to make the best call itself. */
+  private fireQuestionTimeout(): void {
+    try {
+      const gate = this.pendingQuestion;
+      if (!gate) return;
+      this.pendingQuestion = null;
+      this.questionTimer = null;
+      this.waitingFor = null;
+      const seconds = this.config.questionTimeoutSeconds ?? 300;
+      const waited = seconds >= 60 ? `${Math.round(seconds / 60)} min` : `${seconds}s`;
+      console.log(`[Session ${this.id}] Question unanswered after ${waited} — proceeding on its own`);
+      this.broadcast({ type: 'question_resolved', sessionId: this.id, toolUseId: gate.toolUseId });
+      this.broadcast({ type: 'state_change', sessionId: this.id, status: this.status, waitingFor: null });
+      const msg = `[No answer received within ${waited}] Proceed by making the best decision for the situation. Briefly note the assumption you made so it can be reviewed later.`;
+      // internal: programmatic, so it skips task-switch classification
+      this.sendMessage(msg, [], { internal: true }).catch(err => {
+        console.error(`[Session ${this.id}] Question-timeout send failed: ${err.message}`);
+      });
+    } catch (err) {
+      console.error(`[Session ${this.id}] fireQuestionTimeout failed:`, err);
+    }
+  }
+
+  /** Clear the answer gate (answer arrived, user moved on, or session torn down). */
+  private clearQuestionTimer(): void {
+    if (this.questionTimer) {
+      clearTimeout(this.questionTimer);
+      this.questionTimer = null;
     }
   }
 
@@ -422,19 +481,32 @@ export class ManagedSession {
     return proc;
   }
 
-  /** Send a tool result back to the active Claude process via stdin (for AskUserQuestion) */
+  /** Deliver the user's answer to an AskUserQuestion.
+   *
+   *  AskUserQuestion auto-fails in headless (--print) mode, so the turn that asked has
+   *  already ended by the time a human answers — the old stdin tool_result path can't apply
+   *  (the process is gone), and writing a stale tool_result to a process now doing OTHER work
+   *  is unsafe. So we deliver the answer as the next *input* instead:
+   *    - busy  → jump to the FRONT of the queue, so it's processed next and never buried
+   *              behind other queued messages (the previous code pushed to the back, which is
+   *              exactly how answers got lost when the session was working);
+   *    - idle  → send immediately.
+   */
   respondToQuestion(toolUseId: string, answer: string): void {
-    if (!this.activeProcess?.stdin?.writable) {
-      console.warn(`[Session ${this.id}] Cannot respond to question — no active writable process`);
-      return;
+    console.log(`[Session ${this.id}] Question answer for ${toolUseId}: ${answer.slice(0, 80)}`);
+    // The human answered — cancel the proceed-on-its-own timeout and clear the waiting indicator.
+    this.clearQuestionTimer();
+    this.pendingQuestion = null;
+    this.waitingFor = null;
+    this.broadcast({ type: 'state_change', sessionId: this.id, status: this.status, waitingFor: null });
+    if (this.status === 'working' || this.pendingTaskSwitch) {
+      this.queuedMessages.unshift({ text: answer, internal: false });
+      this.broadcast({ type: 'queue_update', sessionId: this.id, queue: [...this.queuedMessages] });
+    } else {
+      this.sendMessage(answer, undefined, { internal: false }).catch(err => {
+        console.error(`[Session ${this.id}] Failed to deliver question answer:`, err);
+      });
     }
-    const payload = JSON.stringify({
-      type: 'tool_result',
-      tool_use_id: toolUseId,
-      result: answer,
-    });
-    console.log(`[Session ${this.id}] Sending question response for ${toolUseId}: ${answer.slice(0, 80)}`);
-    this.activeProcess.stdin.write(payload + '\n');
   }
 
   private async *readNdjson(proc: ChildProcess): AsyncGenerator<unknown> {
@@ -572,6 +644,14 @@ export class ManagedSession {
       this.cancelWakeup();
     }
 
+    // Fresh user input also resolves the answer gate — the human responded (even if not via
+    // the answer UI), so the proceed-on-its-own timeout should no longer fire. (respondToQuestion
+    // already clears it before queuing the answer, so this only fires for unrelated new input.)
+    if (this.pendingQuestion && !opts?.internal) {
+      this.clearQuestionTimer();
+      this.pendingQuestion = null;
+    }
+
     // Auto-compact when the user starts a new task after a pause.
     // Internal messages (triggers, wakeups, queue-drains of programmatic sends) skip this.
     if (!opts?.internal && this.shouldCheckForTaskSwitch(message)) {
@@ -581,8 +661,11 @@ export class ManagedSession {
         isSwitch = await classifyTaskSwitch(this.messages, message);
       } catch {
         // classifier errors never block the message
+      } finally {
+        // Always clear, even if the await is interrupted — a stuck flag silently
+        // queues every future message on this session forever.
+        this.pendingTaskSwitch = false;
       }
-      this.pendingTaskSwitch = false;
 
       if (isSwitch) {
         this.lastAutoCompactAt = Date.now();
@@ -618,8 +701,9 @@ export class ManagedSession {
     // Update status
     this.status = 'working';
     this.error = null;
+    this.waitingFor = null;
     this.lastActiveAt = new Date().toISOString();
-    this.broadcast({ type: 'state_change', sessionId: this.id, status: 'working' });
+    this.broadcast({ type: 'state_change', sessionId: this.id, status: 'working', waitingFor: null });
     console.log(`[Session ${this.id}] Starting query (resume=${!!this.sdkSessionId})`);
 
     // Stall detection: abort if no SDK messages for 8 minutes.
@@ -682,6 +766,7 @@ export class ManagedSession {
       const systemParts: string[] = [
         'When running Bash commands that involve SSH, SCP, network requests, package installs (apt-get, pip, npm), or builds, always set the timeout parameter to at least 300000 (5 minutes). The default 2-minute timeout is too short for these operations.',
         'When you discover a non-obvious rule, constraint, workaround, or hard-won lesson during this session — something a future Claude session would need to avoid a mistake — flag it with this exact format on its own line: "[CLAUDE.md candidate: <concise rule, 10-20 words>]". Only flag things genuinely worth persisting; do not flag obvious facts or things already in CLAUDE.md.',
+        'AskUserQuestion will appear to FAIL in this environment — that is expected; the question is surfaced to the user in the web UI instead. After you call AskUserQuestion, STOP and end your turn. Do not proceed on assumptions. The user\'s answer will be delivered as your next message; if they do not answer in time you will instead receive an explicit instruction to proceed with your best judgment.',
       ];
 
       if (this.config.controllerMode) {
@@ -909,6 +994,21 @@ export class ManagedSession {
               });
             }
 
+            // Auto-apply any [CLAUDE.md candidate: ...] rules the model flagged. The helper
+            // dedupes, so re-seeing the same message (streaming finalization) is a safe no-op.
+            if (text) {
+              for (const candidate of extractClaudeMdCandidates(text)) {
+                try {
+                  if (applyClaudeMdCandidate(this.config.cwd, candidate)) {
+                    this.broadcast({ type: 'claude_md_applied', sessionId: this.id, candidate });
+                    console.log(`[Session ${this.id}] Auto-applied CLAUDE.md candidate: ${candidate.slice(0, 80)}`);
+                  }
+                } catch (err) {
+                  console.error(`[Session ${this.id}] Failed to auto-apply CLAUDE.md candidate:`, err);
+                }
+              }
+            }
+
             // Detect ScheduleWakeup tool uses — set up a server-side timer to auto-resume
             for (const tu of toolUses) {
               if (tu.name === 'ScheduleWakeup') {
@@ -949,6 +1049,7 @@ export class ManagedSession {
                       options: q.options,
                     },
                   });
+                  this.armQuestionTimeout(tu.id);
                   console.log(`[Session ${this.id}] AskUserQuestion detected: ${q.question?.slice(0, 80)}`);
                 }
               }
@@ -1025,6 +1126,32 @@ export class ManagedSession {
           case 'rate_limit_event': {
             const rle = msg as any;
             this.emitDebugLog('sdk_event', 'rate_limit', JSON.stringify(rle, null, 2));
+            // Confirmed live shape:
+            //   { rate_limit_info: { rateLimitType, status, resetsAt (epoch s),
+            //                        utilization? (0-1, absent when status="allowed"/window fresh) } }
+            // "allowed_warning" → utilization present (e.g. 1.0 = fully used)
+            // "rejected"        → utilization absent
+            // "allowed"         → utilization absent (new window, usage=0)
+            try {
+              const info = rle.rate_limit_info;
+              if (info && info.resetsAt) {
+                const resetsAt = new Date(
+                  info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt
+                ).toISOString();
+                // utilization absent = fresh window or rejected — we know the reset time
+                // but NOT the real %, so pass null rather than a misleading 0.
+                const usedPercent = typeof info.utilization === 'number'
+                  ? Math.max(0, Math.min(100, Math.round(info.utilization * 100)))
+                  : null;
+                const window: RateLimitWindow = { usedPercent, resetsAt, status: info.status ?? '' };
+                const type = info.rateLimitType ?? info.rate_limit_type ?? '';
+                recordSubscriptionLimits(
+                  type === 'seven_day' ? { weekly: window } : { session: window },
+                );
+              }
+            } catch (err) {
+              console.error(`[Session ${this.id}] Failed to parse rate_limit_event:`, err);
+            }
             break;
           }
 
@@ -1105,6 +1232,19 @@ export class ManagedSession {
             try { this.activeProcess?.stdin?.end(); } catch {}
             break;
           }
+
+          default: {
+            // Log unrecognised stream event types at startup so new CLI events (e.g. waitingFor
+            // from v2.1.162+) are discoverable. Only log the type + top-level keys, not the full
+            // payload, to keep the log readable.
+            const anyMsg = msg as any;
+            const type = anyMsg?.type;
+            if (type && !['ignored', 'text'].includes(type)) {
+              const keys = Object.keys(anyMsg).filter(k => k !== 'type').join(', ');
+              console.log(`[Session ${this.id}] Unknown stream event type="${type}" keys=[${keys}]`);
+            }
+            break;
+          }
         }
       }
 
@@ -1112,8 +1252,9 @@ export class ManagedSession {
       this.retryCount = 0;
       this.consecutiveStalls = 0;
       this.status = 'idle';
+      this.waitingFor = null;
       this.currentToolActivity = null;
-      this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle' });
+      this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle', waitingFor: null });
       console.log(`[Session ${this.id}] Query completed successfully`);
     } catch (err: any) {
       const errMsg = err.message || 'Unknown error';
@@ -1294,6 +1435,8 @@ export class ManagedSession {
     this.error = null;
     this.currentToolActivity = null;
     this.pendingPermission = null;
+    this.clearQuestionTimer();
+    this.pendingQuestion = null;
     this.debugLog = [];
     // Re-broadcast full session state so the client replaces local state wholesale
     this.broadcast({ type: 'session_created', session: this.getState() });
@@ -1362,6 +1505,9 @@ export class ManagedSession {
 
   async interrupt(): Promise<void> {
     this.cancelWakeup();
+    // User is taking control — don't let the question gate auto-proceed behind them.
+    this.clearQuestionTimer();
+    this.pendingQuestion = null;
     if (this.activeProcess) {
       this.activeProcess.kill('SIGINT');
     }
@@ -1371,11 +1517,41 @@ export class ManagedSession {
     this.pendingPermission = null;
     this.clearWakeupTimer();
     this.pendingWakeup = null;
+    this.clearQuestionTimer();
+    this.pendingQuestion = null;
+
+    // Clean up this session's per-session MCP config (controller mode writes one).
+    // Best-effort — a leftover file is harmless, but cleaning up keeps the dir tidy.
+    try {
+      rmSync(join(MCP_CONFIG_DIR, `${this.id}.json`), { force: true });
+    } catch { /* ignore */ }
 
     if (this.activeProcess) {
       this.activeProcess.kill('SIGINT');
     }
   }
+}
+
+/** Parse one window of a rate_limit_event into our shape. Tolerant of field variants:
+ *  used_percentage (0–100) preferred, else utilization (0–1) × 100; resets_at is epoch
+ *  seconds (occasionally ms), normalized to ISO. Returns null if the window is absent. */
+function parseRateLimitWindow(win: any): RateLimitWindow | null {
+  if (!win || typeof win !== 'object') return null;
+  let pct: number | null = null;
+  if (typeof win.used_percentage === 'number') pct = win.used_percentage;
+  else if (typeof win.utilization === 'number') pct = win.utilization <= 1 ? win.utilization * 100 : win.utilization;
+  if (pct === null) return null;
+
+  const raw = win.resets_at ?? win.resetsAt;
+  let resetsAt: string;
+  if (typeof raw === 'number') {
+    resetsAt = new Date(raw < 1e12 ? raw * 1000 : raw).toISOString(); // epoch seconds → ms
+  } else if (typeof raw === 'string') {
+    resetsAt = raw;
+  } else {
+    return null;
+  }
+  return { usedPercent: Math.max(0, Math.min(100, Math.round(pct))), resetsAt, status: '' };
 }
 
 function summarizeToolInput(toolName: string, input: Record<string, unknown>): string {

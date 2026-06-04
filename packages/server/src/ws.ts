@@ -1,15 +1,14 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import type { Server } from 'http';
 import type { WsInboundMessage, WsOutboundMessage } from '@clauder/shared';
 import { SessionManager } from './session-manager.js';
 import { discoverSessions } from './discovery.js';
-import { getRateLimitInfo } from './rate-limits.js';
+import { getRateLimitInfo, resetRateLimit } from './rate-limits.js';
+import { applyClaudeMdCandidate } from './claude-md.js';
 import { getSkillsForCwd } from './skills.js';
 import type { TriggerManager } from './triggers.js';
 
-export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager) {
+export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner) {
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
 
@@ -79,6 +78,13 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       // TriggerManager may not be initialized yet — skip
     }
 
+    // Send current project runs snapshot
+    try {
+      ws.send(JSON.stringify({ type: 'project_runs_snapshot', runs: getProjectRunner().list() }));
+    } catch {
+      // ProjectRunner may not be initialized yet — skip
+    }
+
     // Send skill list per session so the dropdown is populated on reconnect
     for (const session of sessionManager.getAllSessions()) {
       try {
@@ -92,7 +98,7 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
     ws.on('message', async (data) => {
       try {
         const msg: WsInboundMessage = JSON.parse(data.toString());
-        await handleMessage(msg, sessionManager, broadcast, getTriggers);
+        await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner);
       } catch (err: any) {
         console.error('[WS] Error handling message:', err);
         ws.send(JSON.stringify({
@@ -117,6 +123,7 @@ async function handleMessage(
   sessionManager: SessionManager,
   broadcast: (msg: WsOutboundMessage) => void,
   getTriggers: () => TriggerManager,
+  getProjectRunner: () => import('./project-runner.js').ProjectRunner,
 ) {
   switch (msg.type) {
     case 'create_session': {
@@ -304,6 +311,46 @@ async function handleMessage(
       break;
     }
 
+    case 'reset_rate_limit': {
+      // Zero the usage bar at period rollover. resetRateLimit notifies the listener,
+      // which broadcasts a rate_limit_update to all clients.
+      resetRateLimit();
+      break;
+    }
+
+    case 'create_project_run': {
+      try {
+        getProjectRunner().createRun({
+          name: msg.name,
+          repoPath: msg.repoPath,
+          goal: msg.goal,
+          budget: msg.budget,
+          executorModel: msg.executorModel,
+        });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: '', message: `Create run failed: ${err.message}` });
+      }
+      break;
+    }
+
+    case 'approve_project_run': {
+      try {
+        getProjectRunner().approveRun(msg.runId, { budget: msg.budget, verifyCommands: msg.verifyCommands });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: '', message: `Approve run failed: ${err.message}` });
+      }
+      break;
+    }
+
+    case 'cancel_project_run': {
+      try {
+        getProjectRunner().cancelRun(msg.runId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: '', message: `Cancel run failed: ${err.message}` });
+      }
+      break;
+    }
+
     case 'cancel_wakeup': {
       try {
         sessionManager.cancelWakeup(msg.sessionId);
@@ -317,18 +364,9 @@ async function handleMessage(
       try {
         const session = sessionManager.getSession(msg.sessionId);
         if (!session) throw new Error('Session not found');
-        const candidate = msg.candidate.trim();
-        if (!candidate) throw new Error('Empty candidate');
-        if (candidate.length > 500) throw new Error('Candidate too long');
-        const claudeMdPath = join(session.config.cwd, 'CLAUDE.md');
-        let existing = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf8') : '';
-        const sectionHeader = '## Discovered during sessions';
-        if (!existing.includes(sectionHeader)) {
-          existing = existing.trimEnd() + (existing ? '\n\n' : '') + sectionHeader + '\n';
-        }
-        existing = existing.trimEnd() + `\n- ${candidate}\n`;
-        writeFileSync(claudeMdPath, existing, 'utf8');
-        broadcast({ type: 'claude_md_applied', sessionId: msg.sessionId, candidate });
+        // Deduping append — same helper used by auto-apply, so manual and automatic stay consistent.
+        applyClaudeMdCandidate(session.config.cwd, msg.candidate);
+        broadcast({ type: 'claude_md_applied', sessionId: msg.sessionId, candidate: msg.candidate.trim() });
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: `CLAUDE.md update failed: ${err.message}` });
       }
