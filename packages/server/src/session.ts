@@ -113,6 +113,10 @@ export class ManagedSession {
   compactedContext: string | null = null;
   private retryCount = 0;
   private consecutiveStalls = 0;
+  /** When set, fire auto-recovery as soon as the current query finishes (used when
+   * the CLI emits a context-credit error as an assistant message rather than as
+   * a result error — we can't recover mid-stream). */
+  private pendingPostQueryRecover = false;
 
   constructor(config: SessionConfig, broadcast: (msg: WsOutboundMessage) => void, origin?: SessionOrigin) {
     this.id = uuid();
@@ -994,6 +998,17 @@ export class ManagedSession {
               });
             }
 
+            // Detect API errors emitted as assistant text (e.g. compaction failures
+            // surface here instead of as a result error). If we see the 1M-credit
+            // wall or related context errors, schedule auto-recovery to fire after
+            // this query finishes — we can't recover mid-stream.
+            if (text && /Usage credits required for 1M context|request_too_large|prompt is too long/i.test(text)) {
+              if (this.sdkSessionId && !this.pendingPostQueryRecover) {
+                console.log(`[Session ${this.id}] Detected context-credit error in assistant text — scheduling auto-recovery`);
+                this.pendingPostQueryRecover = true;
+              }
+            }
+
             // Auto-apply any [CLAUDE.md candidate: ...] rules the model flagged. The helper
             // dedupes, so re-seeing the same message (streaming finalization) is a safe no-op.
             if (text) {
@@ -1169,7 +1184,7 @@ export class ManagedSession {
                 || 'Unknown error';
               // Auto-recover on 413 request too large: reset SDK session and
               // re-send the last user message (it will be primed with compacted context)
-              if (/request_too_large|413|prompt is too long/i.test(errorText) && this.sdkSessionId) {
+              if (/request_too_large|413|prompt is too long|Usage credits required for 1M context/i.test(errorText) && this.sdkSessionId) {
                 console.log(`[Session ${this.id}] Request too large (from result) — auto-recovering`);
                 this.autoRecoverFrom413();
                 // Don't set error — we're auto-recovering
@@ -1256,6 +1271,16 @@ export class ManagedSession {
       this.currentToolActivity = null;
       this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle', waitingFor: null });
       console.log(`[Session ${this.id}] Query completed successfully`);
+
+      // If the assistant text included a context-credit error, fire auto-recovery now
+      // that the query is done (we couldn't do it mid-stream).
+      if (this.pendingPostQueryRecover && this.sdkSessionId) {
+        this.pendingPostQueryRecover = false;
+        console.log(`[Session ${this.id}] Firing deferred auto-recovery after context-credit error`);
+        this.autoRecoverFrom413();
+      } else {
+        this.pendingPostQueryRecover = false;
+      }
     } catch (err: any) {
       const errMsg = err.message || 'Unknown error';
       console.log(`[Session ${this.id}] Query error: ${errMsg}`);
@@ -1265,7 +1290,7 @@ export class ManagedSession {
       const lastMsgContent = this.messages.length > 0
         ? this.messages[this.messages.length - 1].content
         : '';
-      const has413InMessages = typeof lastMsgContent === 'string' && /request_too_large|413|prompt is too long/i.test(lastMsgContent);
+      const has413InMessages = typeof lastMsgContent === 'string' && /request_too_large|413|prompt is too long|Usage credits required for 1M context/i.test(lastMsgContent);
 
       // Check for auth errors in stderr/messages
       const lastDebugEntries = this.debugLog.slice(-5).map(e => e.content).join(' ');
@@ -1280,7 +1305,7 @@ export class ManagedSession {
         return;
       }
 
-      if ((has413InMessages || /request_too_large|413|prompt is too long/i.test(errMsg)) && this.sdkSessionId) {
+      if ((has413InMessages || /request_too_large|413|prompt is too long|Usage credits required for 1M context/i.test(errMsg)) && this.sdkSessionId) {
         console.log(`[Session ${this.id}] Request too large (from crash) — auto-recovering`);
         this.autoRecoverFrom413();
         return;
@@ -1298,12 +1323,15 @@ export class ManagedSession {
 
       // 413 request_too_large: SDK session file is too bloated to resume.
       // Auto-reset the SDK session so the next message starts fresh.
-      const isRequestTooLarge = /request_too_large|413|prompt is too long/i.test(errMsg);
+      const isRequestTooLarge = /request_too_large|413|prompt is too long|Usage credits required for 1M context/i.test(errMsg);
       if (isRequestTooLarge && this.sdkSessionId) {
         console.log(`[Session ${this.id}] Request too large — abandoning SDK session ${this.sdkSessionId} to start fresh`);
         this.reset();
         this.status = 'error';
-        this.error = 'Session too large for API. It has been auto-reset — your next message will start a fresh conversation.';
+        const is1mCredits = /Usage credits required for 1M context/i.test(errMsg);
+        this.error = is1mCredits
+          ? 'Compaction hit the 1M-context credit wall. Session auto-reset — your next message will start a fresh CLI conversation with prior context summarized. (Or enable usage credits at claude.ai/settings/usage to allow compaction.)'
+          : 'Session too large for API. It has been auto-reset — your next message will start a fresh conversation.';
         this.currentToolActivity = null;
         this.broadcast({
           type: 'state_change',
@@ -1448,12 +1476,16 @@ export class ManagedSession {
 
     // Find the last user message to re-send
     const lastUserMsg = [...this.messages].reverse().find(m => m.role === 'user');
-    const resendText = lastUserMsg?.content
-      ? (typeof lastUserMsg.content === 'string' ? lastUserMsg.content : 'Continue where you left off.')
-      : 'Continue where you left off.';
+    const lastUserText = lastUserMsg?.content && typeof lastUserMsg.content === 'string'
+      ? lastUserMsg.content.trim()
+      : '';
 
-    // Remove the last user message so sendMessage doesn't duplicate it
-    if (lastUserMsg) {
+    // If the failing command was /compact, don't re-send it — the fresh session
+    // has nothing to compact yet. Just mark idle so the user can continue.
+    const wasCompactCommand = lastUserText === '/compact' || lastUserText.startsWith('/compact ');
+
+    // Remove the last user message so sendMessage doesn't duplicate it (unless we're skipping resend)
+    if (lastUserMsg && !wasCompactCommand) {
       this.messages = this.messages.filter(m => m.id !== lastUserMsg.id);
     }
 
@@ -1461,12 +1493,24 @@ export class ManagedSession {
     const sysMsg: UIMessage = {
       id: uuid(),
       role: 'system',
-      content: `Session too large (413) — auto-recovering with context from prior conversation. (Old SDK session: ${oldSdkId})`,
+      content: wasCompactCommand
+        ? `Compaction hit the 1M-context credit wall. Session auto-reset — start a fresh conversation. Your prior history is summarized and will prime the next message you send. (Old SDK session: ${oldSdkId})`
+        : `Session too large (413) — auto-recovering with context from prior conversation. (Old SDK session: ${oldSdkId})`,
       timestamp: new Date().toISOString(),
     };
     this.messages.push(sysMsg);
     this.broadcast({ type: 'assistant_message', sessionId: this.id, messageId: sysMsg.id, text: sysMsg.content });
 
+    if (wasCompactCommand) {
+      // Don't re-send /compact. Mark idle; user can continue from here.
+      this.status = 'idle';
+      this.currentToolActivity = null;
+      this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle' });
+      console.log(`[Session ${this.id}] Auto-recovered from /compact failure — no resend needed`);
+      return;
+    }
+
+    const resendText = lastUserText || 'Continue where you left off.';
     console.log(`[Session ${this.id}] Auto-recovering from 413 — resending: "${resendText.slice(0, 80)}..."`);
 
     // Re-send with primed context (wasReset is true, so sendMessage will inject compacted context)

@@ -7,8 +7,7 @@ import { StatusBadge } from './StatusBadge';
 import { PermissionModeSelector } from './PermissionModeSelector';
 import { FileBrowser } from './FileBrowser';
 import { DebugLogView } from './DebugLogView';
-import { ModelSelector } from './ModelSelector';
-import { EffortSelector } from './EffortSelector';
+import { ModelEffortSelector } from './ModelEffortSelector';
 import { WakeupBanner } from './WakeupBanner';
 import { WatchPanel } from './WatchPanel';
 import { PlanBanner } from './PlanBanner';
@@ -194,13 +193,11 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
                 Controller
               </span>
             )}
-            <ModelSelector
+            <ModelEffortSelector
               model={session.config.model}
-              onChange={(model) => setModel(session.id, model)}
-            />
-            <EffortSelector
               effort={session.config.effort}
-              onChange={(effort) => setEffort(session.id, effort || '')}
+              onModelChange={(model) => setModel(session.id, model)}
+              onEffortChange={(effort) => setEffort(session.id, effort || '')}
             />
             <PermissionModeSelector
               mode={session.permissionMode}

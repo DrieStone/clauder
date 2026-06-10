@@ -204,4 +204,3 @@ tail -f ~/.clauder/clauder.log
 ## Discovered during sessions
 - AskUserQuestion auto-fails in headless CLI mode; deliver answers as queue-jumping messages, not stdin tool_results.
 - Claude Code sessions run AS CHILD PROCESSES of Clauder. Running `launchctl kickstart -k` from inside a Clauder session kills the server, which kills the session mid-turn — causing an apparent "interruption". Never attempt a kickstart from within Clauder; instruct Jonathan to run it in a standalone terminal instead.
-- Server runs with NODE_ENV=production; use npm install --include=dev to install devDependencies.
