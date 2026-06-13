@@ -10,6 +10,7 @@ interface Preset {
 // Full model IDs so "Opus 4.8" actually runs claude-opus-4-8, not whatever
 // alias the CLI defaults to. Update when Anthropic ships new model versions.
 const PRESETS: Preset[] = [
+  { label: 'Fable 5 — Max',     model: 'claude-fable-5',             effort: 'max',    color: 'text-purple-400' },
   { label: 'Opus 4.8 — Max',    model: 'claude-opus-4-8',            effort: 'max',    color: 'text-red-400'    },
   { label: 'Sonnet 4.6 — Med',  model: 'claude-sonnet-4-6',          effort: 'medium', color: 'text-yellow-400' },
   { label: 'Haiku 4.5 — Med',   model: 'claude-haiku-4-5-20251001',  effort: 'medium', color: 'text-green-400'  },
