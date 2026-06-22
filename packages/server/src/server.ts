@@ -7,6 +7,7 @@ import { execFile, spawn as spawnChild } from 'child_process';
 import type { SessionManager } from './session-manager.js';
 import type { TriggerManager } from './triggers.js';
 import type { ProjectRunner } from './project-runner.js';
+import type { WsOutboundMessage } from '@clauder/shared';
 import { getRateLimitInfo } from './rate-limits.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,7 +22,12 @@ function resolveSafePath(cwd: string, relativePath: string): string | null {
   return resolved;
 }
 
-export function createApp(sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => ProjectRunner) {
+export function createApp(
+  sessionManager: SessionManager,
+  getTriggers: () => TriggerManager,
+  getProjectRunner: () => ProjectRunner,
+  getBroadcast: () => (msg: WsOutboundMessage) => void = () => () => {},
+) {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
@@ -89,15 +95,53 @@ export function createApp(sessionManager: SessionManager, getTriggers: () => Tri
 
   app.post('/api/claude-auth/login', (_req, res) => {
     const cli = findCliPath();
-    // claude auth login opens a browser on the server machine — fire and forget
     const cmd = cli.isNative ? cli.command : process.execPath;
-    const args = cli.isNative ? ['auth', 'login'] : [cli.command, 'auth', 'login'];
-    const proc = spawnChild(cmd, args, {
-      detached: true,
-      stdio: 'ignore',
+    const args = cli.isNative ? ['auth', 'login', '--claudeai'] : [cli.command, 'auth', 'login', '--claudeai'];
+    const proc = spawnChild(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let responded = false;
+    let output = '';
+
+    const tryExtractUrl = (chunk: string) => {
+      output += chunk;
+      if (responded) return;
+      // CLI prints: "If the browser didn't open, visit: <url>"
+      const match = output.match(/visit:\s*(https:\/\/\S+)/);
+      if (match) {
+        responded = true;
+        res.json({ ok: true, url: match[1] });
+      }
+    };
+
+    proc.stdout?.on('data', (d: Buffer) => tryExtractUrl(d.toString()));
+    proc.stderr?.on('data', (d: Buffer) => tryExtractUrl(d.toString()));
+
+    // Fallback: if no URL extracted within 5s, respond without one (browser may have auto-opened)
+    const timeout = setTimeout(() => {
+      if (!responded) {
+        responded = true;
+        res.json({ ok: true, url: null });
+      }
+    }, 5000);
+
+    proc.on('close', (code) => {
+      clearTimeout(timeout);
+      if (!responded) {
+        responded = true;
+        res.json({ ok: code === 0, url: null });
+      }
+      if (code === 0) {
+        getBroadcast()({ type: 'auth_restored' });
+      }
     });
-    proc.unref();
-    res.json({ ok: true, message: 'Login flow started — complete authentication in the browser window that opened on the server.' });
+
+    proc.on('error', (err) => {
+      clearTimeout(timeout);
+      if (!responded) {
+        responded = true;
+        res.status(500).json({ ok: false, error: err.message });
+      }
+    });
   });
 
   // --- Triggers (watches + scheduled tasks) ---

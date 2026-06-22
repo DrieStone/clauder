@@ -75,4 +75,5 @@ export type WsOutboundMessage =
   | { type: 'project_runs_snapshot'; runs: ProjectRun[] }
   | { type: 'project_run_update'; run: ProjectRun }
   | { type: 'project_run_removed'; runId: string }
-  | { type: 'error'; sessionId: string; message: string };
+  | { type: 'error'; sessionId: string; message: string }
+  | { type: 'auth_restored' };

@@ -88,7 +88,8 @@ type Action =
   | { type: 'WS_CONNECTED'; connected: boolean }
   | { type: 'DISCOVERED_SESSIONS'; sessions: DiscoveredSession[] }
   | { type: 'SET_SHOW_DISCOVERY'; show: boolean }
-  | { type: 'SET_DISCOVERY_LOADING'; loading: boolean };
+  | { type: 'SET_DISCOVERY_LOADING'; loading: boolean }
+  | { type: 'AUTH_RESTORED' };
 
 function updateSession(
   sessions: Map<string, SessionState>,
@@ -504,6 +505,17 @@ function reducer(state: AppState, action: Action): AppState {
     case 'SET_DISCOVERY_LOADING':
       return { ...state, discoveryLoading: action.loading };
 
+    case 'AUTH_RESTORED': {
+      // Clear AUTH_EXPIRED error from all sessions so they return to idle
+      const sessions = new Map(state.sessions);
+      for (const [id, s] of sessions) {
+        if (s.error === 'AUTH_EXPIRED') {
+          sessions.set(id, { ...s, status: 'idle', error: null });
+        }
+      }
+      return { ...state, sessions };
+    }
+
     default:
       return state;
   }
@@ -732,6 +744,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         break;
       case 'error':
         dispatch({ type: 'ERROR', sessionId: msg.sessionId, message: msg.message });
+        break;
+      case 'auth_restored':
+        dispatch({ type: 'AUTH_RESTORED' });
         break;
     }
   }, []);

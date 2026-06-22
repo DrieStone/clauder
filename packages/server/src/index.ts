@@ -37,12 +37,16 @@ let triggerManager: TriggerManager;
 // Project Runner — drives overnight autonomous runs. Wired up post-WS.
 let projectRunner: ProjectRunner;
 
+// Broadcast placeholder — replaced once WebSocket is set up (createApp needs it before WS init)
+let broadcastFn: (msg: WsOutboundMessage) => void = () => {};
+
 // Create Express app and HTTP server
-const app = createApp(sessionManager, () => triggerManager, () => projectRunner);
+const app = createApp(sessionManager, () => triggerManager, () => projectRunner, () => broadcastFn);
 const server = http.createServer(app);
 
 // Set up WebSocket on the same server
 const { broadcast } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner);
+broadcastFn = broadcast;
 
 // Broadcast rate limit updates to all clients
 onRateLimitUpdate((rateLimit) => {

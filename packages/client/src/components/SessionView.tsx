@@ -33,6 +33,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   const [cwdValue, setCwdValue] = useState(session.config.cwd);
   const cwdInputRef = useRef<HTMLInputElement>(null);
   const [generatingSummary, setGeneratingSummary] = useState(false);
+  const [authState, setAuthState] = useState<'idle' | 'waiting'>('idle');
 
   // Clear loading state when summary arrives
   const summaryRef = useRef(session.summary);
@@ -42,6 +43,11 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
       setGeneratingSummary(false);
     }
   }, [session.summary]);
+
+  // Reset auth waiting state when auth is restored (error clears)
+  useEffect(() => {
+    if (session.error !== 'AUTH_EXPIRED') setAuthState('idle');
+  }, [session.error]);
 
   const handleGenerateSummary = () => {
     setGeneratingSummary(true);
@@ -387,16 +393,29 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           {/* Auth expired banner */}
           {session.error === 'AUTH_EXPIRED' && (
             <div className="mx-4 mt-2 px-3 py-2 bg-amber-900/30 border border-amber-700 rounded text-xs text-amber-200 shrink-0 flex items-center justify-between gap-2">
-              <span>Claude authentication expired. Re-login required.</span>
+              <span>
+                {authState === 'waiting'
+                  ? 'Complete authentication in the new tab, then return here.'
+                  : 'Claude authentication expired. Re-login required.'}
+              </span>
               <button
                 onClick={async () => {
+                  if (authState === 'waiting') return;
+                  setAuthState('waiting');
                   try {
-                    await fetch('/api/claude-auth/login', { method: 'POST' });
-                  } catch {}
+                    const res = await fetch('/api/claude-auth/login', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.url) {
+                      window.open(data.url, '_blank', 'noopener');
+                    }
+                  } catch {
+                    setAuthState('idle');
+                  }
                 }}
-                className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white rounded transition-colors whitespace-nowrap"
+                disabled={authState === 'waiting'}
+                className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 disabled:cursor-wait text-white rounded transition-colors whitespace-nowrap"
               >
-                Re-authenticate
+                {authState === 'waiting' ? 'Waiting…' : 'Re-authenticate'}
               </button>
             </div>
           )}
