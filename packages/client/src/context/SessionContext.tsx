@@ -49,7 +49,7 @@ type Action =
   | { type: 'STATE_CHANGE'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
   | { type: 'ASSISTANT_MESSAGE'; sessionId: string; messageId: string; text: string; toolUses?: any[] }
   | { type: 'ASSISTANT_STREAM_DELTA'; sessionId: string; messageId: string; delta: string }
-  | { type: 'USER_MESSAGE_ECHO'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[] }
+  | { type: 'USER_MESSAGE_ECHO'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
   | { type: 'TOOL_ACTIVITY'; sessionId: string; activity: { toolName: string; description: string } }
   | { type: 'RESULT'; sessionId: string; costUsd: number; success: boolean; error?: string }
   | { type: 'CONTEXT_UPDATE'; sessionId: string; contextUsage: { inputTokens: number; outputTokens: number; contextWindow: number } }
@@ -150,6 +150,7 @@ function reducer(state: AppState, action: Action): AppState {
             role: 'user' as const,
             content: action.text,
             images: action.images,
+            files: action.files,
             timestamp: new Date().toISOString(),
           }],
         })),
@@ -620,7 +621,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         break;
       }
       case 'user_message_echo':
-        dispatch({ type: 'USER_MESSAGE_ECHO', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, images: msg.images });
+        dispatch({ type: 'USER_MESSAGE_ECHO', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, images: msg.images, files: msg.files });
         break;
       case 'assistant_message':
         dispatch({ type: 'ASSISTANT_MESSAGE', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, toolUses: msg.toolUses });

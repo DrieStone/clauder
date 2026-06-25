@@ -103,9 +103,34 @@ export function MessageBubble({ message, sessionId }: { message: UIMessage; sess
                 key={i}
                 src={`data:${img.mimeType};base64,${img.data}`}
                 alt={`Attached image ${i + 1}`}
-                className="max-w-[200px] max-h-[200px] rounded object-contain cursor-pointer"
+                className="max-w-[200px] max-h-[200px] rounded object-contain cursor-pointer hover:opacity-90 transition-opacity"
+                title="Click to open full size"
                 onClick={() => window.open(`data:${img.mimeType};base64,${img.data}`, '_blank')}
               />
+            ))}
+          </div>
+        )}
+        {message.files && message.files.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5">
+            {message.files.map((f, i) => (
+              <button
+                key={i}
+                title={`Click to view ${f.name}`}
+                onClick={() => {
+                  if (f.kind === 'document') {
+                    window.open(`data:${f.mimeType};base64,${f.content}`, '_blank');
+                  } else {
+                    const blob = new Blob([f.content], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    window.open(url, '_blank');
+                    setTimeout(() => URL.revokeObjectURL(url), 10000);
+                  }
+                }}
+                className="flex items-center gap-1 px-2 py-1 bg-blue-800/40 border border-blue-600/50 rounded text-xs text-blue-200 hover:bg-blue-700/40 hover:border-blue-500 transition-colors cursor-pointer"
+              >
+                <span>{f.kind === 'document' ? '📄' : '📝'}</span>
+                <span className="max-w-[160px] truncate">{f.name}</span>
+              </button>
             ))}
           </div>
         )}

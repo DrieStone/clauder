@@ -41,7 +41,7 @@ export type WsOutboundMessage =
   | { type: 'state_change'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
   | { type: 'assistant_message'; sessionId: string; messageId: string; text: string; toolUses?: { id: string; name: string; input: Record<string, unknown> }[] }
   | { type: 'assistant_message_stream'; sessionId: string; messageId: string; delta: string }
-  | { type: 'user_message_echo'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[] }
+  | { type: 'user_message_echo'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
   | { type: 'tool_activity'; sessionId: string; activity: ToolActivity }
   | { type: 'result'; sessionId: string; costUsd: number; success: boolean; error?: string }
   | { type: 'context_update'; sessionId: string; contextUsage: ContextUsage }

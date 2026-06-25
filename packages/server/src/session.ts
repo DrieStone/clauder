@@ -692,15 +692,17 @@ export class ManagedSession {
 
     // Add user message to history
     const userMsgId = uuid();
+    const files = opts?.files;
     const userMsg: UIMessage = {
       id: userMsgId,
       role: 'user',
       content: message,
       images: images?.length ? images : undefined,
+      files: files?.length ? files : undefined,
       timestamp: new Date().toISOString(),
     };
     this.messages.push(userMsg);
-    this.broadcast({ type: 'user_message_echo', sessionId: this.id, messageId: userMsgId, text: message, images: images?.length ? images : undefined });
+    this.broadcast({ type: 'user_message_echo', sessionId: this.id, messageId: userMsgId, text: message, images: images?.length ? images : undefined, files: files?.length ? files : undefined });
 
     // Update status
     this.status = 'working';

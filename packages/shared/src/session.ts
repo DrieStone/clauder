@@ -109,6 +109,7 @@ export interface UIMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   toolUses?: ToolUseInfo[];
   timestamp: string;
   isStreaming?: boolean;
