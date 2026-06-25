@@ -473,7 +473,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           {/* Input */}
           <PromptInput
             sessionId={session.id}
-            onSend={(msg, images, planMode) => sendMessage(session.id, msg, images, planMode)}
+            onSend={(msg, images, planMode, files) => sendMessage(session.id, msg, images, planMode, files)}
             onInterrupt={() => interruptSession(session.id)}
             isWorking={isWorking}
             draft={draft}

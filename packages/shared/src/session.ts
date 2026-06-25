@@ -79,6 +79,15 @@ export interface ImageAttachment {
   mimeType: string;   // image/png, image/jpeg, image/gif, image/webp
 }
 
+export interface FileAttachment {
+  name: string;
+  mimeType: string;
+  /** Raw text for text files; base64 for binary files (PDFs) */
+  content: string;
+  /** 'text' for source/text files injected as text blocks; 'document' for PDFs */
+  kind: 'text' | 'document';
+}
+
 export interface Skill {
   /** Command name without leading slash, e.g. "simplify" */
   name: string;
@@ -90,6 +99,7 @@ export interface Skill {
 export interface QueuedMessage {
   text: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   /** True if this message was injected programmatically (trigger, wakeup, etc.) rather than typed by the user. */
   internal?: boolean;
 }

@@ -5,7 +5,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import type { ChildProcess } from 'child_process';
-import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType, RateLimitWindow } from '@clauder/shared';
+import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType, RateLimitWindow } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
 import { recordCostDelta, recordSubscriptionLimits } from './rate-limits.js';
 import { classifyTaskSwitch } from './task-classifier.js';
@@ -228,8 +228,8 @@ export class ManagedSession {
   }
 
   /** Queue a message to be sent after the current turn finishes */
-  queueMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean }): void {
-    this.queuedMessages.push({ text: message, images: images?.length ? images : undefined, internal: opts?.internal });
+  queueMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; files?: FileAttachment[] }): void {
+    this.queuedMessages.push({ text: message, images: images?.length ? images : undefined, files: opts?.files?.length ? opts.files : undefined, internal: opts?.internal });
     this.broadcast({
       type: 'queue_update',
       sessionId: this.id,
@@ -633,12 +633,12 @@ export class ManagedSession {
     }
   }
 
-  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean }): Promise<void> {
+  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[] }): Promise<void> {
     // If busy OR a task-switch classification is in flight, queue and bail.
     // Queueing while classifying preserves order: messages arriving during the
     // ~500ms Haiku call wait their turn instead of racing.
     if (this.status === 'working' || this.pendingTaskSwitch) {
-      this.queueMessage(message, images, { internal: opts?.internal });
+      this.queueMessage(message, images, { internal: opts?.internal, files: opts?.files });
       return;
     }
 
@@ -847,14 +847,19 @@ export class ManagedSession {
       }
 
       // Build stdin message
+      const files = opts?.files;
       let stdinPayload: string;
-      if (images?.length) {
+      if (images?.length || files?.length) {
         const contentBlocks: any[] = [
-          ...images.map(img => ({
+          ...(images ?? []).map(img => ({
             type: 'image' as const,
             source: { type: 'base64' as const, media_type: img.mimeType, data: img.data },
           })),
-          { type: 'text' as const, text: message || 'What is in this image?' },
+          ...(files ?? []).map(f => f.kind === 'document'
+            ? { type: 'document' as const, source: { type: 'base64' as const, media_type: f.mimeType, data: f.content } }
+            : { type: 'text' as const, text: `=== ${f.name} ===\n${f.content}` }
+          ),
+          { type: 'text' as const, text: message || (images?.length ? 'What is in this image?' : 'Examine the attached file(s).') },
         ];
         stdinPayload = JSON.stringify({
           type: 'user',
@@ -1423,7 +1428,7 @@ export class ManagedSession {
       // Fire and forget - the recursive call handles its own lifecycle.
       // Preserve the internal flag so programmatic messages (triggers/wakeups)
       // that were queued while busy still skip task-switch classification.
-      this.sendMessage(next.text, next.images, { internal: next.internal }).catch(err => {
+      this.sendMessage(next.text, next.images, { internal: next.internal, files: next.files }).catch(err => {
         console.error(`Error processing queued message for session ${this.id}:`, err);
       });
     }

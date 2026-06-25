@@ -1,5 +1,5 @@
 import { ManagedSession } from './session.js';
-import type { SessionConfig, SessionState, PermissionMode, ImageAttachment } from '@clauder/shared';
+import type { SessionConfig, SessionState, PermissionMode, ImageAttachment, FileAttachment } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
 import { saveSessions, loadSessions } from './persistence.js';
 
@@ -82,7 +82,7 @@ export class SessionManager {
     return state;
   }
 
-  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean }): Promise<void> {
+  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[] }): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
@@ -90,7 +90,7 @@ export class SessionManager {
 
     // If paused, queue instead of sending
     if (this.pauseUntil && new Date(this.pauseUntil).getTime() > Date.now()) {
-      session.queueMessage(message, images, { internal: opts?.internal });
+      session.queueMessage(message, images, { internal: opts?.internal, files: opts?.files });
       return;
     }
 

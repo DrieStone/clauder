@@ -1,14 +1,30 @@
 import { useState, useCallback, useRef, useEffect, useMemo, type KeyboardEvent, type ClipboardEvent, type DragEvent } from 'react';
 import { useSessions } from '../context/SessionContext';
-import type { ImageAttachment, Skill } from '@clauder/shared';
+import type { ImageAttachment, FileAttachment, Skill } from '@clauder/shared';
 import { SkillDropdown } from './SkillDropdown';
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_FILES = 5;
+
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv',
+  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+  'py', 'rb', 'php', 'java', 'kt', 'swift', 'go', 'rs', 'c', 'cpp', 'h',
+  'cs', 'sh', 'bash', 'zsh', 'fish', 'sql', 'graphql', 'html', 'css', 'scss',
+  'env', 'gitignore', 'dockerfile', 'makefile', 'lock',
+]);
+
+function isTextFile(file: File): boolean {
+  if (file.type.startsWith('text/')) return true;
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+  return TEXT_EXTENSIONS.has(ext);
+}
 
 interface PromptInputProps {
   sessionId: string;
-  onSend: (message: string, images?: ImageAttachment[], planMode?: boolean) => void;
+  onSend: (message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[]) => void;
   onInterrupt: () => void;
   isWorking: boolean;
   draft: string;
@@ -20,6 +36,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
   const [value, setValue] = useState(draft);
   const prevSessionIdRef = useRef(sessionId);
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [files, setFiles] = useState<FileAttachment[]>([]);
 
   // When switching sessions, restore the saved draft for the new session
   useEffect(() => {
@@ -77,15 +94,44 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
     reader.readAsDataURL(file);
   }, []);
 
+  const addFile = useCallback((file: File) => {
+    if (file.size > MAX_FILE_SIZE) return;
+    const isPdf = file.type === 'application/pdf';
+    const isText = isTextFile(file);
+    if (!isPdf && !isText) return;
+
+    if (isPdf) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        setFiles(prev => {
+          if (prev.length >= MAX_FILES) return prev;
+          return [...prev, { name: file.name, mimeType: file.type, content: base64, kind: 'document' }];
+        });
+      };
+      reader.readAsDataURL(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setFiles(prev => {
+          if (prev.length >= MAX_FILES) return prev;
+          return [...prev, { name: file.name, mimeType: file.type || 'text/plain', content: reader.result as string, kind: 'text' }];
+        });
+      };
+      reader.readAsText(file);
+    }
+  }, []);
+
   const handleSend = useCallback((planMode = false) => {
     const trimmed = value.trim();
-    if (!trimmed && images.length === 0) return;
-    onSend(trimmed, images.length > 0 ? images : undefined, planMode);
+    if (!trimmed && images.length === 0 && files.length === 0) return;
+    onSend(trimmed, images.length > 0 ? images : undefined, planMode, files.length > 0 ? files : undefined);
     setValue('');
     onDraftChange('');
     setImages([]);
+    setFiles([]);
     setSkillsOpen(false);
-  }, [value, images, onSend, onDraftChange]);
+  }, [value, images, files, onSend, onDraftChange]);
 
   const insertSkill = useCallback((skill: Skill) => {
     // Replace the leading "/<token>" (and an optional trailing space) with "/<name> "
@@ -169,11 +215,14 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
   const handleDrop = useCallback((e: DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const files = e.dataTransfer.files;
-    for (const file of files) {
-      addImageFile(file);
+    for (const file of e.dataTransfer.files) {
+      if (file.type.startsWith('image/')) {
+        addImageFile(file);
+      } else {
+        addFile(file);
+      }
     }
-  }, [addImageFile]);
+  }, [addImageFile, addFile]);
 
   const removeImage = useCallback((index: number) => {
     setImages(prev => prev.filter((_, i) => i !== index));
@@ -228,6 +277,27 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
         </div>
       )}
 
+      {/* File chips */}
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {files.map((f, i) => (
+            <div key={i} className="flex items-center gap-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-gray-200 group">
+              <span className="text-gray-400">{f.kind === 'document' ? '📄' : '📝'}</span>
+              <span className="max-w-[160px] truncate">{f.name}</span>
+              <button
+                onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))}
+                className="ml-0.5 text-gray-500 hover:text-red-400 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          {files.length >= MAX_FILES && (
+            <span className="text-xs text-gray-500 self-center ml-1">Max {MAX_FILES} files</span>
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2">
         {!isWorking && (
           <button
@@ -270,7 +340,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
         {!isWorking && (
           <button
             onClick={() => handleSend(true)}
-            disabled={!value.trim() && images.length === 0}
+            disabled={!value.trim() && images.length === 0 && files.length === 0}
             title="Plan first (Cmd/Ctrl+Enter): Claude proposes a plan before executing"
             className="px-3 py-2 bg-purple-700 hover:bg-purple-600 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-lg transition-colors"
           >
@@ -279,7 +349,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
         )}
         <button
           onClick={() => handleSend(false)}
-          disabled={!value.trim() && images.length === 0}
+          disabled={!value.trim() && images.length === 0 && files.length === 0}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-lg transition-colors"
         >
           {isWorking ? 'Queue' : 'Send'}

@@ -1,10 +1,10 @@
-import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from './session.js';
+import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from './session.js';
 import type { ProjectRun, RunBudget } from './project-run.js';
 
 // Browser -> Server
 export type WsInboundMessage =
   | { type: 'create_session'; config: SessionConfig }
-  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; planMode?: boolean }
+  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; files?: FileAttachment[]; planMode?: boolean }
   | { type: 'plan_response'; sessionId: string; toolUseId: string; decision: 'accept' | 'reject'; feedback?: string }
   | { type: 'destroy_session'; sessionId: string }
   | { type: 'interrupt_session'; sessionId: string }

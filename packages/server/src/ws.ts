@@ -137,7 +137,7 @@ async function handleMessage(
 
     case 'send_message': {
       try {
-        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode });
+        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode, files: msg.files });
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }

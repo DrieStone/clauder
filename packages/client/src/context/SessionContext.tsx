@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget } from '@clauder/shared';
 import { WsClient } from '../lib/ws-client';
 import { notify } from '../lib/notifications';
 
@@ -525,7 +525,7 @@ function reducer(state: AppState, action: Action): AppState {
 interface SessionContextValue {
   state: AppState;
   createSession: (config: SessionConfig) => void;
-  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean) => void;
+  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[]) => void;
   respondToPlan: (sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => void;
   refreshSkills: (sessionId: string) => void;
   clearSession: (sessionId: string) => void;
@@ -768,8 +768,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'create_session', config });
   }, []);
 
-  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean) => {
-    wsRef.current?.send({ type: 'send_message', sessionId, message, images, planMode });
+  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[]) => {
+    wsRef.current?.send({ type: 'send_message', sessionId, message, images, files, planMode });
   }, []);
 
   const respondToPlanFn = useCallback((sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => {
