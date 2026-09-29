@@ -7,6 +7,7 @@ import { StatusBadge } from './StatusBadge';
 import { PermissionModeSelector } from './PermissionModeSelector';
 import { FileBrowser } from './FileBrowser';
 import { DebugLogView } from './DebugLogView';
+import { GitIndicator } from './GitIndicator';
 import { ModelEffortSelector } from './ModelEffortSelector';
 import { TagControl, SessionTagChips, primaryTagColor } from './Tags';
 import { WakeupBanner } from './WakeupBanner';
@@ -404,6 +405,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           <GoalControl session={session} />
           <TagControl session={session} />
           <SessionTagChips session={session} />
+          <GitIndicator sessionId={session.id} working={session.status === 'working'} />
         </div>
         <div className="order-2 sm:order-3 flex items-center gap-0.5 sm:gap-3 shrink-0">
           <RateLimitBar />

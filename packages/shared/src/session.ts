@@ -287,6 +287,28 @@ export interface UIMessage {
   pinned?: boolean;
 }
 
+/** Version-control state of a session's folder (GET /api/sessions/:id/git), for the session header's
+ *  repo indicator. Anything about the remote reflects the last fetch or push. */
+export interface GitStatus {
+  /** False when the folder isn't inside a git repository (or git couldn't run there). */
+  isRepo: boolean;
+  /** The checked-out branch; null when detached or not a repo. */
+  branch: string | null;
+  /** Where it's backed up, as "owner/repo" (host-prefixed off GitHub); null with no remote. */
+  remoteLabel: string | null;
+  /** Browser link to the remote, when one can be derived. */
+  remoteWebUrl: string | null;
+  /** The latest commit (ISO) and its subject; null in a repo with no commits yet. */
+  lastCommitAt: string | null;
+  lastCommitSubject: string | null;
+  /** Files with uncommitted changes, untracked ones included. */
+  changedFiles: number;
+  /** Commits on this branch that no remote has yet; null with no remote. */
+  unpushedCommits: number | null;
+  /** When git was run. */
+  checkedAt: string;
+}
+
 export interface ToolResultInfo {
   /** Tool output content, truncated to 10K chars on server */
   content: string;

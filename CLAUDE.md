@@ -79,6 +79,10 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     `CLAUDER_DEV_ROOT`), and `GET /api/projects` lists what's already there. The client sends only
     a name (`create_session.projectFolder`) and the server picks the path. The name rules live in
     shared `project-folder.ts` so the form and the server agree.
+  - `git-status.ts` — the session header's repo indicator (`GET /api/sessions/:id/git`, drawn by the
+    client's `GitIndicator.tsx`): branch, last commit, uncommitted files, commits no remote has. Runs
+    git in the session's own folder (never a client-supplied path) with `GIT_OPTIONAL_LOCKS=0` so it
+    can't collide with a session's commit, caches 10s, and strips credentials from remote URLs.
   - `ui-state.ts` — `UiStateManager`: view state that follows Jonathan across devices — when each
     session was last read, tabs closed from the tab menu, and pinned-tab order — persisted to
     `~/.clauder/ui-state.json` (TagManager-style, saves debounced 1s) and broadcast as a full
@@ -266,3 +270,4 @@ tail -f ~/.clauder/clauder.log
 - Context-error auto-recovery must react only to CLI-written messages (is_api_error_message, model <synthetic>); matching Claude's own prose made a reply about the error loop
 - Client re-renders: per-message and per-card components use useSessionActions()/useTagRegistry() plus React.memo; any useSessions() inside re-renders them on every WS message
 - Animate only transform or opacity: the width/margin progress bar forced 60-120 page layouts a second, ~15% of the tab's CPU
+- Pushes to GitHub can drop with unexpected disconnect while reading sideband packet; retry with git -c http.version=HTTP/1.1 push

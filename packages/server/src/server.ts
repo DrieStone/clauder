@@ -13,6 +13,7 @@ import { getRateLimitInfo } from './rate-limits.js';
 import { logUsage } from './usage-log.js';
 import { DEV_ROOT, devRootForDisplay, listProjectFolders } from './projects.js';
 import { search, smartSearch } from './search.js';
+import { getGitStatus } from './git-status.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -179,6 +180,16 @@ export function createApp(
       return;
     }
     res.json(session.getState());
+  });
+
+  // The session header's repo indicator. The folder comes from the session, never from the client.
+  app.get('/api/sessions/:id/git', async (req, res) => {
+    const session = sessionManager.getSession(req.params.id);
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    res.json(await getGitStatus(session.config.cwd));
   });
 
   // --- Claude auth endpoints ---
