@@ -1,10 +1,18 @@
-import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill } from './session.js';
+import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, UIMessage, UiState } from './session.js';
 import type { ProjectRun, RunBudget } from './project-run.js';
 
 // Browser -> Server
 export type WsInboundMessage =
-  | { type: 'create_session'; config: SessionConfig }
-  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; files?: FileAttachment[]; planMode?: boolean }
+  // projectFolder: create (or reuse) that folder in the server's dev root and run the session in
+  // it — the new-session form's "New project" option. config.cwd is replaced on that path.
+  | { type: 'create_session'; config: SessionConfig; projectFolder?: string }
+  // Cross-device view state (server/src/ui-state.ts). merge_ui_state is sent once per device, with
+  // what it tracked locally before syncing existed.
+  | { type: 'mark_read'; sessionId: string }
+  | { type: 'set_tab_closed'; sessionId: string; closed: boolean }
+  | { type: 'set_pin_order'; ids: string[] }
+  | { type: 'merge_ui_state'; state: Partial<UiState> }
+  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; files?: FileAttachment[]; planMode?: boolean; model?: string; effort?: string }
   | { type: 'plan_response'; sessionId: string; toolUseId: string; decision: 'accept' | 'reject'; feedback?: string }
   | { type: 'destroy_session'; sessionId: string }
   | { type: 'interrupt_session'; sessionId: string }
@@ -31,6 +39,39 @@ export type WsInboundMessage =
   | { type: 'apply_claude_md_candidate'; sessionId: string; candidate: string }
   | { type: 'list_skills'; sessionId: string }
   | { type: 'clear_session'; sessionId: string }
+  /** Snapshot the live thread into the parked list and start a fresh conversation. `name?`
+   *  overrides the auto-derived name for the thread being parked. */
+  | { type: 'park_thread'; sessionId: string; name?: string }
+  /** Swap a parked thread back in as the live one (parking the current live thread first, if it
+   *  has any content). */
+  | { type: 'resume_thread'; sessionId: string; threadId: string }
+  | { type: 'discard_thread'; sessionId: string; threadId: string }
+  /** Rename a thread — `threadId` may be the session's activeThreadId to rename the live thread. */
+  | { type: 'rename_thread'; sessionId: string; threadId: string; name: string }
+  /** Task selector's "New task": park the current task (if it has content), then start a fresh
+   *  one with this name on its own starting model/effort. */
+  | { type: 'start_task'; sessionId: string; name: string; model?: string; effort?: string }
+  | { type: 'set_goal'; sessionId: string; goal: { text: string; checkEveryMin?: number; deadlineHours?: number; maxNudges?: number } | null }
+  | { type: 'set_notes'; sessionId: string; notes: string | null }
+  | { type: 'set_pinned'; sessionId: string; pinned: boolean }
+  /** Replace the set of tags applied to a session (tag ids). */
+  | { type: 'set_tags'; sessionId: string; tags: string[] }
+  /** Ask for a session's full message history (the session list only carries recent messages). */
+  | { type: 'request_history'; sessionId: string }
+  /** Ask for a session's debug log — the session list doesn't carry it; the Debug tab asks. */
+  | { type: 'request_debug_log'; sessionId: string }
+  /** Tag-registry CRUD (the tag editor with colors). */
+  | { type: 'create_tag'; label: string; color: string }
+  | { type: 'update_tag'; id: string; label?: string; color?: string }
+  | { type: 'delete_tag'; id: string }
+  | { type: 'pin_message'; sessionId: string; messageId: string; pinned: boolean }
+  | { type: 'stop_model_plan'; sessionId: string }
+  | { type: 'stop_monitor'; sessionId: string; monitorId: string }
+  | { type: 'archive_session'; sessionId: string }
+  /** Generic feature-usage log for pure client-side navigation (tab switches, modal opens)
+   *  that never otherwise touches the server. `feature` is a short slug, `detail` a few
+   *  safe scalar fields only — never free text. */
+  | { type: 'log_event'; feature: string; detail?: Record<string, string | number | boolean> }
   | { type: 'ping' };
 
 // Server -> Browser
@@ -39,7 +80,7 @@ export type WsOutboundMessage =
   | { type: 'session_created'; session: SessionState }
   | { type: 'session_destroyed'; sessionId: string }
   | { type: 'state_change'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
-  | { type: 'assistant_message'; sessionId: string; messageId: string; text: string; toolUses?: { id: string; name: string; input: Record<string, unknown> }[] }
+  | { type: 'assistant_message'; sessionId: string; messageId: string; text: string; thinking?: string; toolUses?: { id: string; name: string; input: Record<string, unknown> }[]; images?: ImageAttachment[] }
   | { type: 'assistant_message_stream'; sessionId: string; messageId: string; delta: string }
   | { type: 'user_message_echo'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
   | { type: 'tool_activity'; sessionId: string; activity: ToolActivity }
@@ -71,9 +112,29 @@ export type WsOutboundMessage =
   | { type: 'claude_md_applied'; sessionId: string; candidate: string }
   | { type: 'pending_plan'; sessionId: string; toolUseId: string; plan: string; messageId: string }
   | { type: 'plan_resolved'; sessionId: string; toolUseId: string }
+  | { type: 'monitors_update'; sessionId: string; monitors: MonitorInfo[] }
   | { type: 'skills_list'; sessionId: string; skills: Skill[] }
   | { type: 'project_runs_snapshot'; runs: ProjectRun[] }
   | { type: 'project_run_update'; run: ProjectRun }
   | { type: 'project_run_removed'; runId: string }
+  | { type: 'goal_updated'; sessionId: string; goal: GoalState | null }
+  | { type: 'notes_updated'; sessionId: string; notes: string | null; notesUpdatedAt: string | null }
+  | { type: 'pinned_changed'; sessionId: string; pinned: boolean }
+  /** A session's tag set changed. */
+  | { type: 'tags_changed'; sessionId: string; tags: string[] }
+  /** Full snapshot of the tag registry (sent on connect and after any tag CRUD). */
+  | { type: 'tags_registry'; tags: TagDef[] }
+  | { type: 'ui_state'; state: UiState }
+  /** Reply to `request_history`: the session's full history, attachments as URLs. */
+  | { type: 'session_history'; sessionId: string; messages: UIMessage[] }
+  /** Reply to `request_debug_log`: the session's recent debug entries. */
+  | { type: 'session_debug_log'; sessionId: string; entries: DebugLogEntry[] }
+  | { type: 'message_pinned'; sessionId: string; messageId: string; pinned: boolean }
+  | { type: 'model_plan_updated'; sessionId: string; plan: ModelPlan | null }
+  | { type: 'archive_status'; sessionId: string; stage: 'summarizing' | 'zipping' | 'verifying' | 'trashing' | 'done' | 'error'; message: string }
+  | { type: 'archive_complete'; sessionId: string; zipPath: string }
   | { type: 'error'; sessionId: string; message: string }
-  | { type: 'auth_restored' };
+  | { type: 'auth_restored' }
+  /** Parked-thread list changed (rename/discard) without a full session replace — park/resume
+   *  instead ride the existing 'session_created' broadcast (see ManagedSession.clearMessages). */
+  | { type: 'threads_update'; sessionId: string; threads: ThreadSummary[]; activeThreadId: string; activeThreadName: string | null };

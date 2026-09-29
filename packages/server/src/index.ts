@@ -1,3 +1,4 @@
+import './log-setup.js'; // MUST be first — stamps + trims the log before other modules' import-time logging
 import http from 'http';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
@@ -9,13 +10,19 @@ import { SessionManager } from './session-manager.js';
 import { setupWebSocket } from './ws.js';
 import { onRateLimitUpdate } from './rate-limits.js';
 import { TriggerManager } from './triggers.js';
+import { TagManager } from './tags.js';
+import { UiStateManager } from './ui-state.js';
 import { ProjectRunner } from './project-runner.js';
+import { GoalSupervisor } from './goal-supervisor.js';
+import { ModelPlanRunner } from './model-plan-runner.js';
+import { purgeOldUploads } from './uploads.js';
+import { trimUsageLog } from './usage-log.js';
 import type { WsOutboundMessage } from '@clauder/shared';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
 /** Model used for the auto-created scratch session. Cheap enough for quick lookups, capable enough for code questions. */
-const SCRATCH_MODEL = 'claude-sonnet-4-6';
+const SCRATCH_MODEL = 'claude-sonnet-5-5';
 
 // Ensure node is findable when the server is started without a full shell PATH
 // (e.g. via nohup). Prepend the directory of the current node binary and common locations.
@@ -34,8 +41,15 @@ const sessionManager = new SessionManager(() => {});
 
 // Trigger manager — fires messages to sessions on schedule. Wired up post-WS.
 let triggerManager: TriggerManager;
+// Tag registry — user-defined colored session tags. Wired up post-WS.
+let tagManager: TagManager;
+// Cross-device view state — read status, closed tabs, pinned-tab order. Wired up post-WS.
+let uiStateManager: UiStateManager;
 // Project Runner — drives overnight autonomous runs. Wired up post-WS.
 let projectRunner: ProjectRunner;
+// Model Plan Runner — drives multi-step plans. Constructed post-WS (needs `broadcast`);
+// the getter pattern lets ws.ts reference it before it exists.
+let modelPlanRunner: ModelPlanRunner;
 
 // Broadcast placeholder — replaced once WebSocket is set up (createApp needs it before WS init)
 let broadcastFn: (msg: WsOutboundMessage) => void = () => {};
@@ -45,8 +59,39 @@ const app = createApp(sessionManager, () => triggerManager, () => projectRunner,
 const server = http.createServer(app);
 
 // Set up WebSocket on the same server
-const { broadcast } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner);
+const { broadcast, getClientCount } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager);
 broadcastFn = broadcast;
+
+// Tag registry — broadcast the full snapshot to all clients after any CRUD.
+tagManager = new TagManager((tags) => broadcast({ type: 'tags_registry', tags }));
+tagManager.load();
+
+// Read status and tab state, synced across devices — full snapshot to all clients on any change.
+uiStateManager = new UiStateManager((state) => broadcast({ type: 'ui_state', state }), (id) => !!sessionManager.getSession(id));
+uiStateManager.load();
+
+// Hourly health snapshot — one line so slow leaks and stuck sessions are visible in the log
+// (the server runs for weeks; without this, a session wedged in "working" for two days or
+// creeping RSS growth left no trace). ~24 lines/day against a 15MB log cap.
+function logHealthSnapshot(): void {
+  try {
+    const sessions = sessionManager.getAllSessions();
+    const byStatus: Record<string, number> = {};
+    let queued = 0, monitors = 0;
+    for (const s of sessions) {
+      byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
+      queued += s.queuedMessages.length;
+      monitors += s.monitors.length;
+    }
+    const statusStr = Object.entries(byStatus).map(([k, v]) => `${v} ${k}`).join(', ') || 'none';
+    const rssMb = (process.memoryUsage().rss / 1e6).toFixed(0);
+    console.log(`[Health] sessions: ${sessions.length} (${statusStr}) | ws clients: ${getClientCount()} | monitors: ${monitors} | queued msgs: ${queued} | rss: ${rssMb}MB | uptime: ${(process.uptime() / 3600).toFixed(1)}h`);
+  } catch (err) {
+    console.error('[Health] snapshot failed:', err);
+  }
+}
+setInterval(logHealthSnapshot, 60 * 60 * 1000).unref();
+setTimeout(logHealthSnapshot, 60 * 1000).unref(); // first snapshot shortly after startup settles
 
 // Broadcast rate limit updates to all clients
 onRateLimitUpdate((rateLimit) => {
@@ -75,13 +120,30 @@ triggerManager = new TriggerManager(
 );
 triggerManager.load();
 
+// Let sessions create TriggerManager entries via <<schedule_trigger>> sentinels
+sessionManager.setTriggerCreator(({ sessionId, message, description, at }) => {
+  triggerManager.create({ sessionId, message, description, schedule: { type: 'once', at }, source: 'scheduled' });
+});
+
 // Project Runner — drives overnight autonomous runs. Compose the broadcast so every
 // session event also reaches the runner's supervise loop (it filters to its executors).
 projectRunner = new ProjectRunner(sessionManager, broadcast);
+// Goal Supervisor — keeps goal-mode sessions working toward their goal on every idle.
+const goalSupervisor = new GoalSupervisor(sessionManager, () => triggerManager, broadcast);
+// Model Plan Runner — drives multi-step plans, switching the session's model between steps.
+modelPlanRunner = new ModelPlanRunner(sessionManager, broadcast);
 (sessionManager as any).broadcast = (msg: WsOutboundMessage) => {
   broadcast(msg);
   projectRunner.onEvent(msg);
+  goalSupervisor.onEvent(msg);
+  modelPlanRunner.onEvent(msg);
 };
+
+// Purge uploads older than 7 days
+purgeOldUploads(7).catch(err => console.error('[uploads] Purge error:', err));
+
+// Keep the feature-usage log from growing forever across months of daily use
+trimUsageLog();
 
 // Back up sessions before restoring — safety net against future corruption
 backupSessions();
@@ -94,6 +156,10 @@ sessionManager.restoreFromDisk();
 
 // Restore project runs after their executor sessions are back; re-arm resume timers.
 projectRunner.restoreFromDisk();
+
+// Resume supervision of any goal-mode sessions that were active before the restart.
+// Delayed slightly so WS clients and rate-limit state settle first.
+setTimeout(() => { goalSupervisor.kickstartActiveGoals(); modelPlanRunner.kickstartActivePlans(); }, 3000).unref();
 
 // Bootstrap the floating scratch session if it doesn't exist yet.
 // Always-available, hidden from the main session list, can be cleared but not destroyed.
@@ -155,18 +221,22 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Clauder] WebSocket available at ws://0.0.0.0:${PORT}/ws`);
 });
 
-// Prevent unhandled errors from crashing the server
+// Prevent unhandled errors from crashing the server. Log full stacks — a bare message
+// ("write EPIPE") gives no clue where it came from, and a non-Error rejection reason
+// would print as [object Object].
 process.on('uncaughtException', (err) => {
-  console.error('[Clauder] Uncaught exception (server kept alive):', err.message);
+  console.error('[Clauder] Uncaught exception (server kept alive):', err.stack || err.message);
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('[Clauder] Unhandled rejection (server kept alive):', reason);
+  const detail = reason instanceof Error ? (reason.stack || reason.message) : JSON.stringify(reason);
+  console.error('[Clauder] Unhandled rejection (server kept alive):', detail);
 });
 
 // Graceful shutdown — persist first, then kill child processes without touching persistence
 process.on('SIGINT', async () => {
   console.log('\n[Clauder] Shutting down...');
   sessionManager.persistNow();
+  uiStateManager?.flush();
   sessionManager.clearSummaryTimers(); // stop pending summaries firing into closed sockets post-shutdown
   try { await sessionManager.terminateAll(); } catch (err) {
     console.error('[Clauder] Error during shutdown cleanup:', err);
@@ -177,6 +247,7 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   sessionManager.persistNow();
+  uiStateManager?.flush();
   sessionManager.clearSummaryTimers(); // stop pending summaries firing into closed sockets post-shutdown
   try { await sessionManager.terminateAll(); } catch (err) {
     console.error('[Clauder] Error during shutdown cleanup:', err);

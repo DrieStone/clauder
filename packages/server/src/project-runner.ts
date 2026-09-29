@@ -7,7 +7,7 @@ import type { SessionManager } from './session-manager.js';
 import { getRateLimitInfo } from './rate-limits.js';
 import { saveRuns, loadRuns } from './project-runs.js';
 
-const DEFAULT_EXECUTOR_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_EXECUTOR_MODEL = 'claude-sonnet-5-5';
 const QUESTION_TIMEOUT_SECONDS = 45;          // executor never stalls waiting on a human
 const RESET_EVERY_CYCLES = 12;                // refresh executor context periodically
 const MAX_CYCLES = 250;                        // backstop against a no-progress loop
@@ -218,7 +218,8 @@ export class ProjectRunner {
   private armResumeTimer(run: ProjectRun): void {
     this.clearResumeTimer(run.id);
     if (!run.resumeAt) return;
-    const delay = Math.max(1000, new Date(run.resumeAt).getTime() - Date.now());
+    // Add 60-second buffer so we fire after the window has fully reset
+    const delay = Math.max(1000, new Date(run.resumeAt).getTime() - Date.now()) + 60_000;
     this.resumeTimers.set(run.id, setTimeout(() => this.resumeRun(run.id), delay));
   }
 

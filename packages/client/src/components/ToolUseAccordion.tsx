@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { ToolUseInfo } from '@clauder/shared';
 import { summarizeToolUse } from './MessageBubble';
-import { useSessions } from '../context/SessionContext';
+import { useSessionActions } from '../context/SessionContext';
 import { FileDiffView } from './FileDiffView';
 import { WriteFileView } from './WriteFileView';
 
@@ -13,7 +13,7 @@ interface ToolUseAccordionProps {
 export function ToolUseAccordion({ tool, sessionId }: ToolUseAccordionProps) {
   const [open, setOpen] = useState(false);
   const [answered, setAnswered] = useState(false);
-  const { respondToQuestion } = useSessions();
+  const { respondToQuestion } = useSessionActions();
   const desc = summarizeToolUse(tool);
 
   const isQuestion = tool.name === 'AskUserQuestion';

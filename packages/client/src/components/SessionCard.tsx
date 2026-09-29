@@ -1,9 +1,10 @@
-import { useState, useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
+import { memo, useState, useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { SessionState, ContextUsage } from '@clauder/shared';
 import { StatusBadge } from './StatusBadge';
 import { PermissionModeSelector } from './PermissionModeSelector';
-import { useSessions } from '../context/SessionContext';
+import { SessionTagChips, usePrimaryTagColor } from './Tags';
+import { useSessionActions } from '../context/SessionContext';
 import { summarizeToolUse } from './MessageBubble';
 import { PermissionPrompt } from './SessionView';
 import Markdown from 'react-markdown';
@@ -38,7 +39,7 @@ function SummaryTooltip({ summary }: { summary: string }) {
       <span
         ref={iconRef}
         className="shrink-0 cursor-help text-gray-500 hover:text-gray-300"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); visible ? hide() : show(); }}
         onMouseEnter={show}
         onMouseLeave={hide}
       >
@@ -73,19 +74,26 @@ function SummaryTooltip({ summary }: { summary: string }) {
 interface SessionCardProps {
   session: SessionState;
   tier: CardTier;
-  onClick: () => void;
+  /** From the Dashboard: read state lives in the context the card deliberately doesn't read. */
+  unread: boolean;
+  /** Stable (setActiveSession), so the memo holds; the card passes its own id. */
+  onOpen: (sessionId: string) => void;
 }
 
-export function SessionCard({ session, tier, onClick }: SessionCardProps) {
+/** Memoized: the Dashboard re-renders on every WS message, a card only when its own session, tier,
+ *  or unread flag changes. Its parts use useSessionActions()/useTagRegistry(), not useSessions(),
+ *  since any full-context read inside would re-render it on every message anyway. */
+export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen }: SessionCardProps) {
+  const onClick = useCallback(() => onOpen(session.id), [onOpen, session.id]);
   switch (tier) {
     case 'hot':
-      return <HotSessionCard session={session} onClick={onClick} />;
+      return <HotSessionCard session={session} unread={unread} onClick={onClick} />;
     case 'warm':
-      return <WarmSessionCard session={session} onClick={onClick} />;
+      return <WarmSessionCard session={session} unread={unread} onClick={onClick} />;
     case 'history':
-      return <HistorySessionCard session={session} onClick={onClick} />;
+      return <HistorySessionCard session={session} unread={unread} onClick={onClick} />;
   }
-}
+});
 
 function formatTimeAgo(ts: string): string {
   const diff = Date.now() - new Date(ts).getTime();
@@ -106,10 +114,11 @@ function formatDate(ts: string): string {
 
 // ─── Hot: active in the past hour. Chat area + input. ─────────────────────────
 
-function HotSessionCard({ session, onClick }: { session: SessionState; onClick: () => void }) {
-  const { sendMessage, interruptSession, updateLastActive, setPermissionMode, renameSession, respondToPermission } = useSessions();
+function HotSessionCard({ session, unread, onClick }: { session: SessionState; unread: boolean; onClick: () => void }) {
+  const { sendMessage, interruptSession, updateLastActive, setPermissionMode, renameSession, respondToPermission } = useSessionActions();
   const [inputValue, setInputValue] = useState('');
   const [, setTick] = useState(0);
+  const tagColor = usePrimaryTagColor(session);
   const isWorking = session.status === 'working';
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inlineTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -187,9 +196,11 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
   return (
     <div
       className={`bg-gray-900 border rounded-xl overflow-hidden transition-colors flex flex-col ${
-        isWorking ? 'border-amber-700/60' : isScratch ? 'border-amber-800/60' : 'border-gray-800'
+        isWorking ? 'border-amber-700/60' : isScratch ? 'border-amber-800/60' : unread ? 'border-blue-700/60' : 'border-gray-800'
       }`}
     >
+      {/* Primary-tag color bar */}
+      {tagColor && <div className="h-0.5 w-full shrink-0" style={{ backgroundColor: tagColor }} />}
       {/* Needs-you band — replaces the working bar when waiting for input */}
       {session.waitingFor ? (
         <div className="h-0.5 bg-amber-400/60 overflow-hidden">
@@ -206,8 +217,8 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
         onClick={() => { if (!isRenaming) onClick(); }}
         className="w-full text-left px-4 py-2 hover:bg-gray-800/50 transition-colors cursor-pointer group shrink-0"
       >
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-start sm:items-center justify-between gap-2">
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 min-w-0">
             {isRenaming ? (
               <input
                 ref={renameInputRef}
@@ -222,8 +233,8 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
                 className="text-sm font-semibold bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white outline-none focus:border-blue-500 max-w-[180px]"
               />
             ) : (
-              <>
-                <h3 className="text-sm font-semibold text-gray-100 truncate group-hover:text-white">
+              <span className="flex items-center gap-2 min-w-0 max-w-full">
+                <h3 className="text-sm font-semibold text-gray-100 truncate min-w-0 group-hover:text-white">
                   {session.config.name}
                 </h3>
                 <button
@@ -236,22 +247,29 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
                   </svg>
                 </button>
                 {session.summary && <SummaryTooltip summary={session.summary} />}
-              </>
+                {unread && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="Unread messages" />}
+              </span>
             )}
             <StatusBadge status={session.status} waitingFor={session.waitingFor} />
             {session.origin === 'vscode' && (
-              <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
+              <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded whitespace-nowrap">VS Code</span>
             )}
             {session.config.isScratch && (
-              <span className="text-[10px] text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded">📝 Scratch</span>
+              <span className="text-[10px] text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded whitespace-nowrap">📝 Scratch</span>
             )}
+            {(session.threads ?? []).length > 0 && (
+              <span className="text-[10px] text-gray-400 bg-gray-400/10 px-1.5 py-0.5 rounded whitespace-nowrap" title={`${session.threads.length + 1} tasks in this session`}>
+                🗂 {session.threads.length + 1} tasks
+              </span>
+            )}
+            <SessionTagChips session={session} />
             <PermissionModeSelector
               mode={session.permissionMode}
               onChange={(mode) => setPermissionMode(session.id, mode)}
               compact
             />
           </div>
-          <div className="flex items-center gap-3 text-xs text-gray-500 shrink-0">
+          <div className="flex items-center gap-3 text-xs leading-5 text-gray-500 shrink-0">
             <span>{formatTimeAgo(session.lastActiveAt)}</span>
             <span className="text-gray-600">&rarr;</span>
           </div>
@@ -364,8 +382,9 @@ function HotSessionCard({ session, onClick }: { session: SessionState; onClick: 
 
 // ─── Warm: 1-36 hours. Large card, no chat/input. Click to expand. ────────────
 
-function WarmSessionCard({ session, onClick }: { session: SessionState; onClick: () => void }) {
-  const { setPermissionMode, renameSession } = useSessions();
+function WarmSessionCard({ session, unread, onClick }: { session: SessionState; unread: boolean; onClick: () => void }) {
+  const { setPermissionMode, renameSession } = useSessionActions();
+  const tagColor = usePrimaryTagColor(session);
   const isWorking = session.status === 'working';
   const [, setTick] = useState(0);
   const [isRenaming, setIsRenaming] = useState(false);
@@ -394,10 +413,12 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
 
   return (
     <div
-      className={`w-full text-left bg-gray-900 border rounded-xl hover:border-gray-600 transition-colors cursor-pointer group ${
-        isWorking ? 'border-amber-700/60' : 'border-gray-800'
+      className={`w-full text-left bg-gray-900 border rounded-xl overflow-hidden hover:border-gray-600 transition-colors cursor-pointer group ${
+        isWorking ? 'border-amber-700/60' : unread ? 'border-blue-700/60' : 'border-gray-800'
       }`}
     >
+      {/* Primary-tag color bar */}
+      {tagColor && <div className="h-0.5 w-full" style={{ backgroundColor: tagColor }} />}
       <button onClick={() => { if (!isRenaming) onClick(); }} className="w-full text-left p-4">
         {isWorking && (
           <div className="h-0.5 bg-gray-800 overflow-hidden rounded-full mb-3 -mt-1">
@@ -405,8 +426,8 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-2 mb-1.5">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-start sm:items-center justify-between gap-2 mb-1.5">
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 min-w-0">
             {isRenaming ? (
               <input
                 ref={renameInputRef}
@@ -421,8 +442,8 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
                 className="text-sm font-semibold bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white outline-none focus:border-blue-500 max-w-[180px]"
               />
             ) : (
-              <>
-                <h3 className="text-sm font-semibold text-gray-100 truncate group-hover:text-white">
+              <span className="flex items-center gap-2 min-w-0 max-w-full">
+                <h3 className="text-sm font-semibold text-gray-100 truncate min-w-0 group-hover:text-white">
                   {session.config.name}
                 </h3>
                 <button
@@ -435,22 +456,29 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
                   </svg>
                 </button>
                 {session.summary && <SummaryTooltip summary={session.summary} />}
-              </>
+                {unread && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="Unread messages" />}
+              </span>
             )}
             <StatusBadge status={session.status} waitingFor={session.waitingFor} />
             {session.origin === 'vscode' && (
-              <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">VS Code</span>
+              <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded whitespace-nowrap">VS Code</span>
             )}
             {session.config.isScratch && (
-              <span className="text-[10px] text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded">📝 Scratch</span>
+              <span className="text-[10px] text-amber-300 bg-amber-400/10 px-1.5 py-0.5 rounded whitespace-nowrap">📝 Scratch</span>
             )}
+            {(session.threads ?? []).length > 0 && (
+              <span className="text-[10px] text-gray-400 bg-gray-400/10 px-1.5 py-0.5 rounded whitespace-nowrap" title={`${session.threads.length + 1} tasks in this session`}>
+                🗂 {session.threads.length + 1} tasks
+              </span>
+            )}
+            <SessionTagChips session={session} />
             <PermissionModeSelector
               mode={session.permissionMode}
               onChange={(mode) => setPermissionMode(session.id, mode)}
               compact
             />
           </div>
-          <span className="text-xs text-gray-500 shrink-0">{formatTimeAgo(session.lastActiveAt)}</span>
+          <span className="text-xs leading-5 text-gray-500 shrink-0">{formatTimeAgo(session.lastActiveAt)}</span>
         </div>
 
         <div className="text-xs text-gray-500 truncate mb-2">{session.config.cwd}</div>
@@ -458,7 +486,7 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
         {isWorking && <WorkingIndicator activity={session.currentToolActivity} />}
 
         <div className="flex items-center justify-between text-xs text-gray-600">
-          <span>{session.messages.filter(m => m.role !== 'system').length} messages</span>
+          <span>{session.messageCount ?? session.messages.filter(m => m.role !== 'system').length} messages</span>
         </div>
       </button>
       <ContextBar usage={session.contextUsage} sessionId={session.id} />
@@ -468,18 +496,23 @@ function WarmSessionCard({ session, onClick }: { session: SessionState; onClick:
 
 // ─── History: 36+ hours. Minimal row. ─────────────────────────────────────────
 
-function HistorySessionCard({ session, onClick }: { session: SessionState; onClick: () => void }) {
+function HistorySessionCard({ session, unread, onClick }: { session: SessionState; unread: boolean; onClick: () => void }) {
+  const tagColor = usePrimaryTagColor(session);
   return (
     <button
       onClick={onClick}
-      className="w-full text-left bg-gray-900/60 border border-gray-800/60 rounded-lg px-4 py-2.5 hover:border-gray-600 transition-colors cursor-pointer group flex items-center gap-3"
+      className={`relative overflow-hidden w-full text-left bg-gray-900/60 border rounded-lg px-4 py-2.5 hover:border-gray-600 transition-colors cursor-pointer group flex items-center gap-3 ${unread ? 'border-blue-700/60' : 'border-gray-800/60'}`}
     >
+      {/* Primary-tag color bar */}
+      {tagColor && <span className="absolute top-0 inset-x-0 h-0.5" style={{ backgroundColor: tagColor }} />}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
           <h3 className="text-sm text-gray-300 truncate group-hover:text-white">
             {session.config.name}
           </h3>
           {session.summary && <SummaryTooltip summary={session.summary} />}
+          {unread && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="Unread messages" />}
+          <SessionTagChips session={session} />
         </div>
         <div className="text-xs text-gray-600 truncate">{session.config.cwd}</div>
       </div>
@@ -493,7 +526,7 @@ function HistorySessionCard({ session, onClick }: { session: SessionState; onCli
 // ─── Shared context usage bar ────────────────────────────────────────────────
 
 function ContextBar({ usage, sessionId }: { usage: ContextUsage | null; sessionId: string }) {
-  const { compactSession } = useSessions();
+  const { compactSession } = useSessionActions();
   if (!usage || !usage.contextWindow) return null;
 
   const totalUsed = usage.inputTokens + usage.outputTokens;

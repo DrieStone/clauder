@@ -1,7 +1,11 @@
-import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget } from '@clauder/shared';
+import React, { createContext, useContext, useReducer, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, UiState } from '@clauder/shared';
+import { trimMessages } from '@clauder/shared';
 import { WsClient } from '../lib/ws-client';
+import { buildWsCandidates } from '../lib/hosts';
 import { notify } from '../lib/notifications';
+import { isSessionUnread } from '../lib/unread';
+import { loadLocalUiState, saveLocalUiState, localUiStateToMerge, clearLocalUiState } from '../lib/uiStateLocal';
 
 // State
 export interface PendingQuestionInfo {
@@ -32,6 +36,12 @@ interface AppState {
   pendingPlans: Map<string, PendingPlanInfo>;
   /** All triggers (watches + scheduled), keyed by trigger id */
   triggers: Map<string, Trigger>;
+  /** The tag registry (user-defined colored labels), in registry order. */
+  tags: TagDef[];
+  /** Read status, closed tabs and pinned-tab order. Synced across devices by the server once
+   *  `uiSynced`; until then (a server that predates syncing) kept in this browser only. */
+  uiState: UiState;
+  uiSynced: boolean;
   /** Skill list per session: sessionId -> skills available in that session's cwd */
   sessionSkills: Map<string, Skill[]>;
   /** CLAUDE.md candidates already written (auto-applied by the server or applied manually),
@@ -39,6 +49,14 @@ interface AppState {
   appliedClaudeMd: Set<string>;
   /** Overnight Project Runner runs, keyed by run id. */
   projectRuns: Map<string, ProjectRun>;
+  /** Archive-project progress per session: sessionId -> latest stage/message. On the 'done'
+   *  stage the message is the final zip path. Entries for destroyed sessions are harmless
+   *  leftovers (tiny map, never cleaned up — not worth the complexity for v1). */
+  archiveStatus: Map<string, { stage: string; message: string }>;
+  /** The session whose Debug tab is open, if any. Debug logs are held only for it: the session
+   *  list doesn't carry them, the tab fetches them (request_debug_log), and live entries for other
+   *  sessions are dropped without a re-render. */
+  debugSessionId: string | null;
 }
 
 // Actions
@@ -46,8 +64,9 @@ type Action =
   | { type: 'SESSIONS_LIST'; sessions: SessionState[] }
   | { type: 'SESSION_CREATED'; session: SessionState }
   | { type: 'SESSION_DESTROYED'; sessionId: string }
+  | { type: 'SESSION_HISTORY'; sessionId: string; messages: UIMessage[] }
   | { type: 'STATE_CHANGE'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
-  | { type: 'ASSISTANT_MESSAGE'; sessionId: string; messageId: string; text: string; toolUses?: any[] }
+  | { type: 'ASSISTANT_MESSAGE'; sessionId: string; messageId: string; text: string; thinking?: string; toolUses?: any[]; images?: ImageAttachment[] }
   | { type: 'ASSISTANT_STREAM_DELTA'; sessionId: string; messageId: string; delta: string }
   | { type: 'USER_MESSAGE_ECHO'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
   | { type: 'TOOL_ACTIVITY'; sessionId: string; activity: { toolName: string; description: string } }
@@ -64,7 +83,20 @@ type Action =
   | { type: 'SESSION_RENAMED'; sessionId: string; newName: string }
   | { type: 'MODEL_CHANGED'; sessionId: string; model: string }
   | { type: 'EFFORT_CHANGED'; sessionId: string; effort: string | null }
+  | { type: 'GOAL_UPDATED'; sessionId: string; goal: GoalState | null }
+  | { type: 'NOTES_UPDATED'; sessionId: string; notes: string | null; notesUpdatedAt: string | null }
   | { type: 'CWD_CHANGED'; sessionId: string; cwd: string }
+  | { type: 'PINNED_CHANGED'; sessionId: string; pinned: boolean }
+  | { type: 'TAGS_CHANGED'; sessionId: string; tags: string[] }
+  | { type: 'TAGS_REGISTRY'; tags: TagDef[] }
+  | { type: 'UI_STATE'; state: UiState }
+  | { type: 'UI_MARK_READ'; sessionId: string; at: string }
+  | { type: 'UI_TAB_CLOSED'; sessionId: string; closedAt: number | null }
+  | { type: 'UI_PIN_ORDER'; ids: string[] }
+  | { type: 'MESSAGE_PINNED'; sessionId: string; messageId: string; pinned: boolean }
+  | { type: 'MODEL_PLAN_UPDATED'; sessionId: string; plan: ModelPlan | null }
+  | { type: 'ARCHIVE_STATUS'; sessionId: string; stage: string; message: string }
+  | { type: 'ARCHIVE_COMPLETE'; sessionId: string; zipPath: string }
   | { type: 'SUMMARY_GENERATED'; sessionId: string; summary: string; summaryGeneratedAt: string }
   | { type: 'PERMISSION_REQUEST'; sessionId: string; toolUseId: string; toolName: string; input: Record<string, unknown> }
   | { type: 'PERMISSION_RESOLVED'; sessionId: string }
@@ -75,8 +107,11 @@ type Action =
   | { type: 'SKILLS_LIST'; sessionId: string; skills: Skill[] }
   | { type: 'TOOL_RESULT'; sessionId: string; toolUseId: string; result: ToolResultInfo }
   | { type: 'DEBUG_LOG'; sessionId: string; entry: DebugLogEntry }
+  | { type: 'WATCH_DEBUG_LOG'; sessionId: string | null }
+  | { type: 'SESSION_DEBUG_LOG'; sessionId: string; entries: DebugLogEntry[] }
   | { type: 'WAKEUP_SCHEDULED'; sessionId: string; wakeup: PendingWakeup }
   | { type: 'WAKEUP_CLEARED'; sessionId: string }
+  | { type: 'MONITORS_UPDATE'; sessionId: string; monitors: MonitorInfo[] }
   | { type: 'TRIGGERS_SNAPSHOT'; triggers: Trigger[] }
   | { type: 'TRIGGER_CREATED'; trigger: Trigger }
   | { type: 'TRIGGER_UPDATED'; trigger: Trigger }
@@ -89,7 +124,8 @@ type Action =
   | { type: 'DISCOVERED_SESSIONS'; sessions: DiscoveredSession[] }
   | { type: 'SET_SHOW_DISCOVERY'; show: boolean }
   | { type: 'SET_DISCOVERY_LOADING'; loading: boolean }
-  | { type: 'AUTH_RESTORED' };
+  | { type: 'AUTH_RESTORED' }
+  | { type: 'THREADS_UPDATE'; sessionId: string; threads: SessionState['threads']; activeThreadId: string; activeThreadName: string | null };
 
 function updateSession(
   sessions: Map<string, SessionState>,
@@ -103,19 +139,46 @@ function updateSession(
   return next;
 }
 
+// Caps how much chat history the browser keeps in memory / renders per session. Without
+// this, a long-lived session (or a long-lived browser tab that's never reloaded) grows
+// `messages` forever, which slows down the DOM (MessageList renders every entry) and the
+// tab's memory footprint. Server-side history is unaffected — this only trims client state.
+const MAX_MESSAGES_IN_MEMORY = 400;
+
+function appendMessage(messages: UIMessage[], msg: UIMessage): UIMessage[] {
+  return trimMessages([...messages, msg], MAX_MESSAGES_IN_MEMORY);
+}
+
+/** Debug logs are held only for the session whose Debug tab is open (debugSessionId), which
+ *  fetches its own. A server from before that change still sends every session's log in the
+ *  session list; drop those, keeping whatever the open tab already has. */
+function withoutDebugLog(s: SessionState, state: AppState): SessionState {
+  if (s.id === state.debugSessionId) return { ...s, debugLog: state.sessions.get(s.id)?.debugLog ?? [] };
+  return s.debugLog?.length ? { ...s, debugLog: [] } : s;
+}
+
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'SESSIONS_LIST': {
       const sessions = new Map<string, SessionState>();
+      // Rebuild the plan-banner map from the snapshot so a pending plan survives WS reconnects
+      // (mobile drops/reconnects constantly). Without this, pendingPlans is driven only by the
+      // one-shot PENDING_PLAN event and a client that connected late/reconnected shows no banner.
+      const pendingPlans = new Map(state.pendingPlans);
       for (const s of action.sessions) {
-        sessions.set(s.id, s);
+        sessions.set(s.id, withoutDebugLog(s, state));
+        if (s.pendingPlan) {
+          pendingPlans.set(s.id, s.pendingPlan);
+        } else {
+          pendingPlans.delete(s.id);
+        }
       }
-      return { ...state, sessions };
+      return { ...state, sessions, pendingPlans };
     }
 
     case 'SESSION_CREATED': {
       const sessions = new Map(state.sessions);
-      sessions.set(action.session.id, action.session);
+      sessions.set(action.session.id, withoutDebugLog(action.session, state));
       return { ...state, sessions };
     }
 
@@ -145,14 +208,14 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         sessions: updateSession(state.sessions, action.sessionId, (s) => ({
           ...s,
-          messages: [...s.messages, {
+          messages: appendMessage(s.messages, {
             id: action.messageId,
             role: 'user' as const,
             content: action.text,
             images: action.images,
             files: action.files,
             timestamp: new Date().toISOString(),
-          }],
+          }),
         })),
       };
     }
@@ -167,7 +230,9 @@ function reducer(state: AppState, action: Action): AppState {
             id: action.messageId,
             role: 'assistant',
             content: action.text,
+            thinking: action.thinking,
             toolUses: action.toolUses,
+            images: action.images,
             timestamp: new Date().toISOString(),
           };
           if (existingIdx >= 0) {
@@ -175,7 +240,7 @@ function reducer(state: AppState, action: Action): AppState {
             messages[existingIdx] = msg;
             return { ...s, messages };
           }
-          return { ...s, messages: [...s.messages, msg] };
+          return { ...s, messages: appendMessage(s.messages, msg) };
         }),
       };
     }
@@ -197,13 +262,13 @@ function reducer(state: AppState, action: Action): AppState {
           // New streaming message
           return {
             ...s,
-            messages: [...s.messages, {
+            messages: appendMessage(s.messages, {
               id: action.messageId,
               role: 'assistant' as const,
               content: action.delta,
               timestamp: new Date().toISOString(),
               isStreaming: true,
-            }],
+            }),
           };
         }),
       };
@@ -226,6 +291,7 @@ function reducer(state: AppState, action: Action): AppState {
         sessions: updateSession(state.sessions, action.sessionId, (s) => ({
           ...s,
           totalCostUsd: action.costUsd,
+          lastActiveAt: new Date().toISOString(),
         })),
       };
     }
@@ -317,6 +383,27 @@ function reducer(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'GOAL_UPDATED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          config: { ...s.config, goal: action.goal },
+        })),
+      };
+    }
+
+    case 'NOTES_UPDATED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          notes: action.notes,
+          notesUpdatedAt: action.notesUpdatedAt,
+        })),
+      };
+    }
+
     case 'CWD_CHANGED': {
       return {
         ...state,
@@ -325,6 +412,86 @@ function reducer(state: AppState, action: Action): AppState {
           config: { ...s.config, cwd: action.cwd },
         })),
       };
+    }
+
+    case 'SESSION_HISTORY': {
+      // Full history for a session just opened — the bulk list only carried its recent messages.
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({ ...s, messages: action.messages })),
+      };
+    }
+
+    case 'PINNED_CHANGED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          config: { ...s.config, pinned: action.pinned },
+        })),
+      };
+    }
+
+    case 'TAGS_CHANGED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          config: { ...s.config, tags: action.tags },
+        })),
+      };
+    }
+
+    case 'TAGS_REGISTRY': {
+      return { ...state, tags: action.tags };
+    }
+
+    case 'UI_STATE':
+      return { ...state, uiState: action.state, uiSynced: true };
+
+    case 'UI_MARK_READ':
+      return { ...state, uiState: { ...state.uiState, readAt: { ...state.uiState.readAt, [action.sessionId]: action.at } } };
+
+    case 'UI_TAB_CLOSED': {
+      const closedTabs = { ...state.uiState.closedTabs };
+      if (action.closedAt === null) delete closedTabs[action.sessionId];
+      else closedTabs[action.sessionId] = action.closedAt;
+      return { ...state, uiState: { ...state.uiState, closedTabs } };
+    }
+
+    case 'UI_PIN_ORDER':
+      return { ...state, uiState: { ...state.uiState, pinOrder: action.ids } };
+
+    case 'MESSAGE_PINNED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          messages: s.messages.map(m => m.id === action.messageId ? { ...m, pinned: action.pinned } : m),
+        })),
+      };
+    }
+
+    case 'MODEL_PLAN_UPDATED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          config: { ...s.config, modelPlan: action.plan },
+        })),
+      };
+    }
+
+    case 'ARCHIVE_STATUS': {
+      const archiveStatus = new Map(state.archiveStatus);
+      archiveStatus.set(action.sessionId, { stage: action.stage, message: action.message });
+      return { ...state, archiveStatus };
+    }
+
+    case 'ARCHIVE_COMPLETE': {
+      const archiveStatus = new Map(state.archiveStatus);
+      archiveStatus.set(action.sessionId, { stage: 'done', message: action.zipPath });
+      return { ...state, archiveStatus };
     }
 
     case 'SUMMARY_GENERATED': {
@@ -421,6 +588,9 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case 'DEBUG_LOG': {
+      // Only the session with its Debug tab open keeps a log. Returning the same state for the
+      // rest (about one entry a second while sessions work) means they cost no re-render.
+      if (action.sessionId !== state.debugSessionId) return state;
       return {
         ...state,
         sessions: updateSession(state.sessions, action.sessionId, (s) => {
@@ -429,6 +599,21 @@ function reducer(state: AppState, action: Action): AppState {
           return { ...s, debugLog };
         }),
       };
+    }
+
+    case 'WATCH_DEBUG_LOG': {
+      if (action.sessionId === state.debugSessionId) return state;
+      // Free the log of the tab being left; the new one arrives as SESSION_DEBUG_LOG.
+      const prev = state.debugSessionId;
+      const sessions = prev
+        ? updateSession(state.sessions, prev, (s) => (s.debugLog.length ? { ...s, debugLog: [] } : s))
+        : state.sessions;
+      return { ...state, sessions, debugSessionId: action.sessionId };
+    }
+
+    case 'SESSION_DEBUG_LOG': {
+      if (action.sessionId !== state.debugSessionId) return state;
+      return { ...state, sessions: updateSession(state.sessions, action.sessionId, (s) => ({ ...s, debugLog: action.entries })) };
     }
 
     case 'WAKEUP_SCHEDULED': {
@@ -447,6 +632,31 @@ function reducer(state: AppState, action: Action): AppState {
         sessions: updateSession(state.sessions, action.sessionId, (s) => ({
           ...s,
           pendingWakeup: null,
+        })),
+      };
+    }
+
+    // Rename/discard patch the thread list without a full session replace — park/resume
+    // instead ride 'session_created' (SESSION_CREATED above), which already swaps in the
+    // whole session wholesale (messages, activeThreadId, threads, etc.).
+    case 'THREADS_UPDATE': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          threads: action.threads,
+          activeThreadId: action.activeThreadId,
+          activeThreadName: action.activeThreadName,
+        })),
+      };
+    }
+
+    case 'MONITORS_UPDATE': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({
+          ...s,
+          monitors: action.monitors,
         })),
       };
     }
@@ -525,11 +735,23 @@ function reducer(state: AppState, action: Action): AppState {
 // Context
 interface SessionContextValue {
   state: AppState;
-  createSession: (config: SessionConfig) => void;
-  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[]) => void;
+  createSession: (config: SessionConfig, opts?: { projectFolder?: string }) => void;
+  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string) => void;
   respondToPlan: (sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => void;
   refreshSkills: (sessionId: string) => void;
   clearSession: (sessionId: string) => void;
+  /** Snapshot the live thread into the parked list and start a fresh conversation. See
+   *  TaskSelector — parking/resuming never spawns the CLI, so this
+   *  is purely bookkeeping (no quota cost). */
+  parkThread: (sessionId: string, name?: string) => void;
+  /** Swap a parked thread back in as the live one (server parks whatever's currently live
+   *  first, if it has any content). */
+  resumeThread: (sessionId: string, threadId: string) => void;
+  discardThread: (sessionId: string, threadId: string) => void;
+  /** Rename a thread — pass the session's activeThreadId to rename the live thread. */
+  renameThread: (sessionId: string, threadId: string, name: string) => void;
+  /** Task selector's "New task": park the current task and start a named one on its own model. */
+  startTask: (sessionId: string, name: string, model?: string, effort?: string) => void;
   destroySession: (sessionId: string) => void;
   interruptSession: (sessionId: string) => void;
   compactSession: (sessionId: string) => void;
@@ -541,6 +763,10 @@ interface SessionContextValue {
   pauseSessions: (pauseUntil: string) => void;
   resumeSessions: () => void;
   resetRateLimit: () => void;
+  restartServer: () => Promise<void>;
+  stopModelPlan: (sessionId: string) => void;
+  stopMonitor: (sessionId: string, monitorId: string) => void;
+  archiveSession: (sessionId: string) => void;
   createProjectRun: (input: { name: string; repoPath: string; goal: string; budget?: RunBudget; executorModel?: string }) => void;
   approveProjectRun: (runId: string, opts?: { budget?: RunBudget; verifyCommands?: string[] }) => void;
   cancelProjectRun: (runId: string) => void;
@@ -548,17 +774,62 @@ interface SessionContextValue {
   setPermissionMode: (sessionId: string, mode: PermissionMode) => void;
   renameSession: (sessionId: string, newName: string) => void;
   updateCwd: (sessionId: string, cwd: string) => void;
+  setPinned: (sessionId: string, pinned: boolean) => void;
+  /** Pull a session's full history; the session list only carries its recent messages. */
+  requestHistory: (sessionId: string) => void;
+  setTags: (sessionId: string, tags: string[]) => void;
+  /** Mark a session read — on every device once synced. A no-op when nothing is new. */
+  markSessionRead: (sessionId: string) => void;
+  /** Whether a session has activity newer than its last read (on any device, once synced). */
+  isUnread: (session: SessionState) => boolean;
+  setTabClosed: (sessionId: string, closed: boolean) => void;
+  setPinOrder: (ids: string[]) => void;
+  createTag: (label: string, color: string) => void;
+  updateTag: (id: string, patch: { label?: string; color?: string }) => void;
+  deleteTag: (id: string) => void;
+  pinMessage: (sessionId: string, messageId: string, pinned: boolean) => void;
   setModel: (sessionId: string, model: string) => void;
   setEffort: (sessionId: string, effort: string) => void;
+  setGoal: (sessionId: string, goal: { text: string; checkEveryMin?: number; deadlineHours?: number; maxNudges?: number } | null) => void;
+  setNotes: (sessionId: string, notes: string | null) => void;
   generateSummary: (sessionId: string) => void;
   respondToPermission: (sessionId: string, toolUseId: string, decision: 'allow' | 'deny', message?: string) => void;
   respondToQuestion: (sessionId: string, toolUseId: string, answer: string) => void;
   dequeueMessage: (sessionId: string, index: number) => void;
   cancelWakeup: (sessionId: string) => void;
   applyClaudeMdCandidate: (sessionId: string, candidate: string) => void;
+  /** Open (sessionId) or close (null) a session's Debug tab: fetches its log and keeps it live
+   *  while open; closing frees it. */
+  watchDebugLog: (sessionId: string | null) => void;
+  logEvent: (feature: string, detail?: Record<string, string | number | boolean>) => void;
+  // --- Global search (Cmd/Ctrl+K) — UI-only state, not part of the reducer/server snapshot ---
+  showSearch: boolean;
+  openSearch: () => void;
+  closeSearch: () => void;
+  /** Set by requestScrollTo; SessionView watches this and scrolls/highlights the matching
+   *  message, then clears it via setScrollToMessageId(null). */
+  scrollToMessageId: string | null;
+  setScrollToMessageId: (id: string | null) => void;
+  /** Navigates to the session, then arms scrollToMessageId — used by search's session hits. */
+  requestScrollTo: (sessionId: string, messageId: string | undefined) => void;
+  /** Appends text to a session's in-progress compose draft (e.g. "Insert path" from search).
+   *  Drafts themselves live outside this context (App.tsx's draftsRef, read by PromptInput's
+   *  own local state) — this is a one-shot signal PromptInput listens for and applies while
+   *  mounted, since there's no other live channel into that per-session ref. */
+  appendToDraft: (sessionId: string, text: string) => void;
+  draftAppend: { sessionId: string; text: string; nonce: number } | null;
 }
 
-const SessionContext = createContext<SessionContextValue | null>(null);
+/** The parts of the context that change. Everything else is an action with a stable identity. */
+type SessionStateKey = 'state' | 'isUnread' | 'showSearch' | 'scrollToMessageId' | 'draftAppend';
+type SessionStateValue = Pick<SessionContextValue, SessionStateKey>;
+export type SessionActions = Omit<SessionContextValue, SessionStateKey>;
+
+const SessionStateContext = createContext<SessionStateValue | null>(null);
+const SessionActionsContext = createContext<SessionActions | null>(null);
+/** The tag registry on its own: session cards read it for their chips and color bar, and it only
+ *  changes when tags are edited. */
+const SessionTagsContext = createContext<TagDef[]>([]);
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, {
@@ -573,15 +844,25 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     pendingQuestions: new Map(),
     pendingPlans: new Map(),
     triggers: new Map(),
+    tags: [],
+    uiState: { readAt: {}, closedTabs: {}, pinOrder: [] },
+    uiSynced: false,
     sessionSkills: new Map(),
     appliedClaudeMd: new Set<string>(),
     projectRuns: new Map(),
-  });
+    archiveStatus: new Map(),
+    debugSessionId: null,
+  // This browser's own copy until the server syncs — see lib/uiStateLocal.ts.
+  }, (init) => ({ ...init, uiState: loadLocalUiState() }));
 
   const wsRef = useRef<WsClient | null>(null);
 
   // Keep latest state accessible from the WS handler without retriggering useCallback
   const stateRef = useRef(state);
+  // Until the server syncs view state, this browser's copy is the only copy — keep it saved.
+  useEffect(() => {
+    if (!state.uiSynced) saveLocalUiState(state.uiState);
+  }, [state.uiState, state.uiSynced]);
   useEffect(() => { stateRef.current = state; }, [state]);
 
   // Track previous status per session so we only notify on transitions into error
@@ -624,7 +905,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: 'USER_MESSAGE_ECHO', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, images: msg.images, files: msg.files });
         break;
       case 'assistant_message':
-        dispatch({ type: 'ASSISTANT_MESSAGE', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, toolUses: msg.toolUses });
+        dispatch({ type: 'ASSISTANT_MESSAGE', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, thinking: msg.thinking, toolUses: msg.toolUses, images: msg.images });
         break;
       case 'assistant_message_stream':
         dispatch({ type: 'ASSISTANT_STREAM_DELTA', sessionId: msg.sessionId, messageId: msg.messageId, delta: msg.delta });
@@ -659,9 +940,63 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       case 'effort_changed':
         dispatch({ type: 'EFFORT_CHANGED', sessionId: msg.sessionId, effort: msg.effort });
         break;
+      case 'goal_updated':
+        dispatch({ type: 'GOAL_UPDATED', sessionId: msg.sessionId, goal: msg.goal });
+        break;
+      case 'notes_updated':
+        dispatch({ type: 'NOTES_UPDATED', sessionId: msg.sessionId, notes: msg.notes, notesUpdatedAt: msg.notesUpdatedAt });
+        break;
       case 'cwd_changed':
         dispatch({ type: 'CWD_CHANGED', sessionId: msg.sessionId, cwd: msg.cwd });
         break;
+      case 'session_history':
+        dispatch({ type: 'SESSION_HISTORY', sessionId: msg.sessionId, messages: msg.messages });
+        break;
+      case 'session_debug_log':
+        dispatch({ type: 'SESSION_DEBUG_LOG', sessionId: msg.sessionId, entries: msg.entries });
+        break;
+      case 'pinned_changed':
+        dispatch({ type: 'PINNED_CHANGED', sessionId: msg.sessionId, pinned: msg.pinned });
+        break;
+      case 'tags_changed':
+        dispatch({ type: 'TAGS_CHANGED', sessionId: msg.sessionId, tags: msg.tags });
+        break;
+      case 'tags_registry':
+        dispatch({ type: 'TAGS_REGISTRY', tags: msg.tags });
+        break;
+      case 'ui_state': {
+        // First snapshot from a syncing server: fold in what this browser tracked on its own, once,
+        // then drop the local copy. The server broadcasts the merged state straight back.
+        const local = stateRef.current.uiSynced ? null : localUiStateToMerge();
+        if (local) {
+          wsRef.current?.send({ type: 'merge_ui_state', state: local });
+          clearLocalUiState();
+        }
+        dispatch({ type: 'UI_STATE', state: msg.state });
+        break;
+      }
+      case 'message_pinned':
+        dispatch({ type: 'MESSAGE_PINNED', sessionId: msg.sessionId, messageId: msg.messageId, pinned: msg.pinned });
+        break;
+      case 'model_plan_updated':
+        dispatch({ type: 'MODEL_PLAN_UPDATED', sessionId: msg.sessionId, plan: msg.plan });
+        break;
+      case 'archive_status':
+        dispatch({ type: 'ARCHIVE_STATUS', sessionId: msg.sessionId, stage: msg.stage, message: msg.message });
+        break;
+      case 'archive_complete': {
+        dispatch({ type: 'ARCHIVE_COMPLETE', sessionId: msg.sessionId, zipPath: msg.zipPath });
+        // Session is already gone by the time this arrives (destroy happens before this
+        // broadcast) — a brief notice with the zip filename, same mechanism as other
+        // out-of-band events (permission/question), rather than inventing a new toast system.
+        notify({
+          title: '📦 Project archived',
+          body: `Saved to ${msg.zipPath.split('/').pop()}`,
+          sessionId: msg.sessionId,
+          tag: `archive-${msg.sessionId}`,
+        });
+        break;
+      }
       case 'summary_generated':
         dispatch({ type: 'SUMMARY_GENERATED', sessionId: msg.sessionId, summary: msg.summary, summaryGeneratedAt: msg.summaryGeneratedAt });
         break;
@@ -702,6 +1037,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         break;
       case 'wakeup_cleared':
         dispatch({ type: 'WAKEUP_CLEARED', sessionId: msg.sessionId });
+        break;
+      case 'monitors_update':
+        dispatch({ type: 'MONITORS_UPDATE', sessionId: msg.sessionId, monitors: msg.monitors });
         break;
       case 'triggers_snapshot':
         dispatch({ type: 'TRIGGERS_SNAPSHOT', triggers: msg.triggers });
@@ -749,28 +1087,34 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       case 'auth_restored':
         dispatch({ type: 'AUTH_RESTORED' });
         break;
+      case 'threads_update':
+        dispatch({ type: 'THREADS_UPDATE', sessionId: msg.sessionId, threads: msg.threads, activeThreadId: msg.activeThreadId, activeThreadName: msg.activeThreadName });
+        break;
     }
   }, []);
 
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
     const client = new WsClient(
-      wsUrl,
+      buildWsCandidates(),
       handleWsMessage,
-      (connected) => dispatch({ type: 'WS_CONNECTED', connected }),
+      (connected) => {
+        dispatch({ type: 'WS_CONNECTED', connected });
+        // An open Debug tab missed whatever was logged while disconnected — fetch it again.
+        const debugSessionId = stateRef.current.debugSessionId;
+        if (connected && debugSessionId) client.send({ type: 'request_debug_log', sessionId: debugSessionId });
+      },
     );
     client.connect();
     wsRef.current = client;
     return () => client.destroy();
   }, [handleWsMessage]);
 
-  const createSession = useCallback((config: SessionConfig) => {
-    wsRef.current?.send({ type: 'create_session', config });
+  const createSession = useCallback((config: SessionConfig, opts?: { projectFolder?: string }) => {
+    wsRef.current?.send({ type: 'create_session', config, projectFolder: opts?.projectFolder });
   }, []);
 
-  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[]) => {
-    wsRef.current?.send({ type: 'send_message', sessionId, message, images, files, planMode });
+  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string) => {
+    wsRef.current?.send({ type: 'send_message', sessionId, message, images, files, planMode, model, effort });
   }, []);
 
   const respondToPlanFn = useCallback((sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => {
@@ -783,6 +1127,26 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const clearSessionFn = useCallback((sessionId: string) => {
     wsRef.current?.send({ type: 'clear_session', sessionId });
+  }, []);
+
+  const parkThreadFn = useCallback((sessionId: string, name?: string) => {
+    wsRef.current?.send({ type: 'park_thread', sessionId, name });
+  }, []);
+
+  const resumeThreadFn = useCallback((sessionId: string, threadId: string) => {
+    wsRef.current?.send({ type: 'resume_thread', sessionId, threadId });
+  }, []);
+
+  const discardThreadFn = useCallback((sessionId: string, threadId: string) => {
+    wsRef.current?.send({ type: 'discard_thread', sessionId, threadId });
+  }, []);
+
+  const startTaskFn = useCallback((sessionId: string, name: string, model?: string, effort?: string) => {
+    wsRef.current?.send({ type: 'start_task', sessionId, name, model, effort });
+  }, []);
+
+  const renameThreadFn = useCallback((sessionId: string, threadId: string, name: string) => {
+    wsRef.current?.send({ type: 'rename_thread', sessionId, threadId, name });
   }, []);
 
   const destroySession = useCallback((sessionId: string) => {
@@ -803,6 +1167,25 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const setActiveSession = useCallback((sessionId: string | null) => {
     dispatch({ type: 'SET_ACTIVE_SESSION', sessionId });
+  }, []);
+
+  // --- Global search UI state (Cmd/Ctrl+K) — plain useState, not the reducer: purely local
+  // UI plumbing, never persisted or driven by WS events. ---
+  const [showSearch, setShowSearch] = useState(false);
+  const openSearch = useCallback(() => setShowSearch(true), []);
+  const closeSearch = useCallback(() => setShowSearch(false), []);
+
+  const [scrollToMessageId, setScrollToMessageId] = useState<string | null>(null);
+  const requestScrollTo = useCallback((sessionId: string, messageId: string | undefined) => {
+    setActiveSession(sessionId);
+    setScrollToMessageId(messageId ?? null);
+  }, [setActiveSession]);
+
+  const [draftAppend, setDraftAppend] = useState<{ sessionId: string; text: string; nonce: number } | null>(null);
+  const draftAppendNonceRef = useRef(0);
+  const appendToDraft = useCallback((sessionId: string, text: string) => {
+    draftAppendNonceRef.current += 1;
+    setDraftAppend({ sessionId, text, nonce: draftAppendNonceRef.current });
   }, []);
 
   const discoverSessionsFn = useCallback(() => {
@@ -828,6 +1211,25 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const resetRateLimitFn = useCallback(() => {
     wsRef.current?.send({ type: 'reset_rate_limit' });
+  }, []);
+
+  // Plain HTTP, not WS — the server process dies right after responding, so there's no
+  // live WS connection to reply on anyway. The existing WsClient reconnect/host-rollover
+  // logic (lib/ws-client.ts) picks the connection back up once the process is back.
+  const restartServerFn = useCallback(async () => {
+    await fetch('/api/restart-server', { method: 'POST' }).catch(() => { /* expected: process exits mid-response sometimes */ });
+  }, []);
+
+  const stopModelPlanFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'stop_model_plan', sessionId });
+  }, []);
+
+  const stopMonitorFn = useCallback((sessionId: string, monitorId: string) => {
+    wsRef.current?.send({ type: 'stop_monitor', sessionId, monitorId });
+  }, []);
+
+  const archiveSessionFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'archive_session', sessionId });
   }, []);
 
   const createProjectRun = useCallback((input: { name: string; repoPath: string; goal: string; budget?: RunBudget; executorModel?: string }) => {
@@ -858,12 +1260,81 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'update_cwd', sessionId, cwd });
   }, []);
 
+  // Generic feature-usage log for pure client-side navigation (tab switches, modal opens)
+  // that never otherwise reaches the server. See shared/messages.ts for the wire shape.
+  const logEvent = useCallback((feature: string, detail?: Record<string, string | number | boolean>) => {
+    wsRef.current?.send({ type: 'log_event', feature, detail });
+  }, []);
+
+  const setPinnedFn = useCallback((sessionId: string, pinned: boolean) => {
+    wsRef.current?.send({ type: 'set_pinned', sessionId, pinned });
+  }, []);
+
+  const pinMessageFn = useCallback((sessionId: string, messageId: string, pinned: boolean) => {
+    wsRef.current?.send({ type: 'pin_message', sessionId, messageId, pinned });
+  }, []);
+
+  const requestHistory = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'request_history', sessionId });
+  }, []);
+
+  // Optimistic: the change shows at once; once synced the server's snapshot (server clock) follows.
+  // The optimistic times are nudged past the session's last activity so a phone whose clock runs
+  // slow can't briefly re-show what was just read or closed.
+  const markSessionReadFn = useCallback((sessionId: string) => {
+    const st = stateRef.current;
+    const s = st.sessions.get(sessionId);
+    const lastRead = st.uiState.readAt[sessionId];
+    if (s && lastRead && Date.parse(lastRead) >= Date.parse(s.lastActiveAt)) return; // nothing new
+    const at = new Date(Math.max(Date.now(), s ? Date.parse(s.lastActiveAt) : 0)).toISOString();
+    dispatch({ type: 'UI_MARK_READ', sessionId, at });
+    if (st.uiSynced) wsRef.current?.send({ type: 'mark_read', sessionId });
+  }, []);
+
+  const isUnreadFn = useCallback((s: SessionState) => isSessionUnread(s, state.uiState.readAt), [state.uiState.readAt]);
+
+  const setTabClosedFn = useCallback((sessionId: string, closed: boolean) => {
+    const s = stateRef.current.sessions.get(sessionId);
+    const closedAt = closed ? Math.max(Date.now(), s ? Date.parse(s.lastActiveAt) + 1 : 0) : null;
+    dispatch({ type: 'UI_TAB_CLOSED', sessionId, closedAt });
+    if (stateRef.current.uiSynced) wsRef.current?.send({ type: 'set_tab_closed', sessionId, closed });
+  }, []);
+
+  const setPinOrderFn = useCallback((ids: string[]) => {
+    dispatch({ type: 'UI_PIN_ORDER', ids });
+    if (stateRef.current.uiSynced) wsRef.current?.send({ type: 'set_pin_order', ids });
+  }, []);
+
+  const setTagsFn = useCallback((sessionId: string, tags: string[]) => {
+    wsRef.current?.send({ type: 'set_tags', sessionId, tags });
+  }, []);
+
+  const createTagFn = useCallback((label: string, color: string) => {
+    wsRef.current?.send({ type: 'create_tag', label, color });
+  }, []);
+
+  const updateTagFn = useCallback((id: string, patch: { label?: string; color?: string }) => {
+    wsRef.current?.send({ type: 'update_tag', id, ...patch });
+  }, []);
+
+  const deleteTagFn = useCallback((id: string) => {
+    wsRef.current?.send({ type: 'delete_tag', id });
+  }, []);
+
   const setModelFn = useCallback((sessionId: string, model: string) => {
     wsRef.current?.send({ type: 'set_model', sessionId, model });
   }, []);
 
   const setEffortFn = useCallback((sessionId: string, effort: string) => {
     wsRef.current?.send({ type: 'set_effort', sessionId, effort });
+  }, []);
+
+  const setGoalFn = useCallback((sessionId: string, goal: { text: string; checkEveryMin?: number; deadlineHours?: number; maxNudges?: number } | null) => {
+    wsRef.current?.send({ type: 'set_goal', sessionId, goal });
+  }, []);
+
+  const setNotesFn = useCallback((sessionId: string, notes: string | null) => {
+    wsRef.current?.send({ type: 'set_notes', sessionId, notes });
   }, []);
 
   const generateSummaryFn = useCallback((sessionId: string) => {
@@ -891,48 +1362,113 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'apply_claude_md_candidate', sessionId, candidate });
   }, []);
 
+  const watchDebugLogFn = useCallback((sessionId: string | null) => {
+    dispatch({ type: 'WATCH_DEBUG_LOG', sessionId });
+    if (sessionId) wsRef.current?.send({ type: 'request_debug_log', sessionId });
+  }, []);
+
+  // Two contexts, so a component can subscribe to the actions alone. `state` changes on every WS
+  // message; the actions never do (useCallback over refs and dispatch), so a component drawn once
+  // per chat message or per session card that only acts no longer re-renders on every message.
+  // Before the split, each message re-rendered every chat bubble and re-parsed its markdown (~27 ms
+  // per message in a 450-message session). Keep new actions stable: read state via stateRef.
+  const actionList: SessionActions = {
+    createSession,
+    sendMessage,
+    destroySession,
+    interruptSession,
+    compactSession,
+    resetSession,
+    setActiveSession,
+    discoverSessions: discoverSessionsFn,
+    resumeDiscovered,
+    setShowDiscovery,
+    pauseSessions: pauseSessionsFn,
+    resumeSessions: resumeSessionsFn,
+    resetRateLimit: resetRateLimitFn,
+    restartServer: restartServerFn,
+    stopModelPlan: stopModelPlanFn,
+    stopMonitor: stopMonitorFn,
+    archiveSession: archiveSessionFn,
+    createProjectRun,
+    approveProjectRun,
+    cancelProjectRun,
+    updateLastActive,
+    setPermissionMode: setPermissionModeFn,
+    renameSession: renameSessionFn,
+    updateCwd: updateCwdFn,
+    setPinned: setPinnedFn,
+    requestHistory,
+    setTags: setTagsFn,
+    markSessionRead: markSessionReadFn,
+    setTabClosed: setTabClosedFn,
+    setPinOrder: setPinOrderFn,
+    createTag: createTagFn,
+    updateTag: updateTagFn,
+    deleteTag: deleteTagFn,
+    logEvent,
+    pinMessage: pinMessageFn,
+    setModel: setModelFn,
+    setEffort: setEffortFn,
+    setGoal: setGoalFn,
+    setNotes: setNotesFn,
+    generateSummary: generateSummaryFn,
+    respondToPermission: respondToPermissionFn,
+    respondToQuestion: respondToQuestionFn,
+    dequeueMessage: dequeueMessageFn,
+    cancelWakeup: cancelWakeupFn,
+    applyClaudeMdCandidate: applyClaudeMdCandidateFn,
+    respondToPlan: respondToPlanFn,
+    refreshSkills: refreshSkillsFn,
+    clearSession: clearSessionFn,
+    parkThread: parkThreadFn,
+    resumeThread: resumeThreadFn,
+    discardThread: discardThreadFn,
+    renameThread: renameThreadFn,
+    startTask: startTaskFn,
+    openSearch,
+    closeSearch,
+    setScrollToMessageId,
+    requestScrollTo,
+    appendToDraft,
+    watchDebugLog: watchDebugLogFn,
+  };
+  // The same object for as long as every action keeps its identity, which they all do.
+  const actions = useMemo(() => actionList, Object.values(actionList)); // eslint-disable-line react-hooks/exhaustive-deps
+  const stateValue = useMemo<SessionStateValue>(
+    () => ({ state, isUnread: isUnreadFn, showSearch, scrollToMessageId, draftAppend }),
+    [state, isUnreadFn, showSearch, scrollToMessageId, draftAppend],
+  );
+
   return (
-    <SessionContext.Provider value={{
-      state,
-      createSession,
-      sendMessage,
-      destroySession,
-      interruptSession,
-      compactSession,
-      resetSession,
-      setActiveSession,
-      discoverSessions: discoverSessionsFn,
-      resumeDiscovered,
-      setShowDiscovery,
-      pauseSessions: pauseSessionsFn,
-      resumeSessions: resumeSessionsFn,
-      resetRateLimit: resetRateLimitFn,
-      createProjectRun,
-      approveProjectRun,
-      cancelProjectRun,
-      updateLastActive,
-      setPermissionMode: setPermissionModeFn,
-      renameSession: renameSessionFn,
-      updateCwd: updateCwdFn,
-      setModel: setModelFn,
-      setEffort: setEffortFn,
-      generateSummary: generateSummaryFn,
-      respondToPermission: respondToPermissionFn,
-      respondToQuestion: respondToQuestionFn,
-      dequeueMessage: dequeueMessageFn,
-      cancelWakeup: cancelWakeupFn,
-      applyClaudeMdCandidate: applyClaudeMdCandidateFn,
-      respondToPlan: respondToPlanFn,
-      refreshSkills: refreshSkillsFn,
-      clearSession: clearSessionFn,
-    }}>
-      {children}
-    </SessionContext.Provider>
+    <SessionActionsContext.Provider value={actions}>
+      <SessionStateContext.Provider value={stateValue}>
+        <SessionTagsContext.Provider value={state.tags}>
+          {children}
+        </SessionTagsContext.Provider>
+      </SessionStateContext.Provider>
+    </SessionActionsContext.Provider>
   );
 }
 
-export function useSessions() {
-  const ctx = useContext(SessionContext);
-  if (!ctx) throw new Error('useSessions must be used within SessionProvider');
-  return ctx;
+/** State plus actions. Re-renders on every WS message — components drawn once per chat message or
+ *  per session card should use useSessionActions() instead and take what they read as props. */
+export function useSessions(): SessionContextValue {
+  const stateValue = useContext(SessionStateContext);
+  const actions = useContext(SessionActionsContext);
+  const merged = useMemo(() => (stateValue && actions ? { ...actions, ...stateValue } : null), [stateValue, actions]);
+  if (!merged) throw new Error('useSessions must be used within SessionProvider');
+  return merged;
+}
+
+/** The actions alone. Stable, so a consumer re-renders only when its own props change. */
+export function useSessionActions(): SessionActions {
+  const actions = useContext(SessionActionsContext);
+  if (!actions) throw new Error('useSessionActions must be used within SessionProvider');
+  return actions;
+}
+
+/** The tag registry alone, for per-card chips and colors. */
+export function useTagRegistry(): TagDef[] {
+  return useContext(SessionTagsContext);
 }

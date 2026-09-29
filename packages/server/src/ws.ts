@@ -6,10 +6,41 @@ import { discoverSessions } from './discovery.js';
 import { getRateLimitInfo, resetRateLimit } from './rate-limits.js';
 import { applyClaudeMdCandidate } from './claude-md.js';
 import { getSkillsForCwd } from './skills.js';
+import { toClientState, toClientHistory } from './client-view.js';
 import type { TriggerManager } from './triggers.js';
+import type { TagManager } from './tags.js';
+import type { UiStateManager } from './ui-state.js';
+import { logUsage } from './usage-log.js';
+import { ensureProjectFolder } from './projects.js';
 
-export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner) {
-  const wss = new WebSocketServer({ noServer: true });
+/** Pull a few known-safe scalar fields off an inbound WS message for the usage log. Never
+ *  includes free-text fields that may carry conversation/note/goal content (message, notes,
+ *  goal.text, candidate, feedback, answer, newName, cwd) — only structural metadata. */
+function safeDetail(msg: any): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  if (typeof msg.sessionId === 'string') out.sessionId = msg.sessionId;
+  if (typeof msg.model === 'string') out.model = msg.model;
+  if (typeof msg.effort === 'string') out.effort = msg.effort;
+  if (typeof msg.mode === 'string') out.mode = msg.mode;
+  if (typeof msg.decision === 'string') out.decision = msg.decision;
+  if (typeof msg.pinned === 'boolean') out.pinned = msg.pinned;
+  if (typeof msg.planMode === 'boolean') out.planMode = msg.planMode;
+  if (msg.goal !== undefined) out.hasGoal = msg.goal !== null;
+  if (msg.notes !== undefined) out.hasNotes = msg.notes !== null;
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager) {
+  // permessage-deflate cuts the initial sessions_list payload from ~3MB to ~500KB.
+  // Without it, the client can't finish processing before the server sends its next
+  // message, and browsers disconnect+reconnect in a tight loop.
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: {
+      // Only compress messages >= 8KB — small messages aren't worth the CPU
+      threshold: 8 * 1024,
+    },
+  });
   const clients = new Set<WebSocket>();
 
   // Handle HTTP upgrade for WebSocket connections
@@ -51,14 +82,19 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
     clearInterval(pingInterval);
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req: import('http').IncomingMessage) => {
     clients.add(ws);
-    console.log(`[WS] Client connected (${clients.size} total)`);
+    // Identify the client so a phone reconnect-loop is distinguishable from the desktop:
+    // remote IP + a short user-agent tag on both connect and disconnect lines.
+    const ip = String(req?.socket?.remoteAddress ?? '?').replace(/^::ffff:/, '');
+    const ua = String(req?.headers?.['user-agent'] ?? '');
+    const uaTag = /iPhone|iPad|Android|Mobile/i.test(ua) ? 'mobile' : /Macintosh|Windows|X11/i.test(ua) ? 'desktop' : 'other';
+    console.log(`[WS] Client connected (${clients.size} total) — ${ip} ${uaTag}`);
 
     // Send current sessions list on connect
     const sessionsMsg: WsOutboundMessage = {
       type: 'sessions_list',
-      sessions: sessionManager.getAllSessions(),
+      sessions: sessionManager.getAllSessions().map(toClientState),
     };
     ws.send(JSON.stringify(sessionsMsg));
 
@@ -85,20 +121,28 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       // ProjectRunner may not be initialized yet — skip
     }
 
-    // Send skill list per session so the dropdown is populated on reconnect
-    for (const session of sessionManager.getAllSessions()) {
-      try {
-        const skills = getSkillsForCwd(session.config.cwd);
-        ws.send(JSON.stringify({ type: 'skills_list', sessionId: session.id, skills }));
-      } catch {
-        // Per-session scan failures are non-fatal — client falls back to empty list
-      }
+    // Send current tag registry snapshot
+    try {
+      ws.send(JSON.stringify({ type: 'tags_registry', tags: getTags().list() }));
+    } catch {
+      // TagManager may not be initialized yet — skip
     }
+
+    // Cross-device view state: read status, closed tabs, pinned-tab order
+    try {
+      ws.send(JSON.stringify({ type: 'ui_state', state: getUiState().snapshot() }));
+    } catch {
+      // UiStateManager may not be initialized yet — skip
+    }
+
+    // Skills are NOT sent for every session here any more: that was one message and one disk
+    // scan per session on every connect. SessionView asks for the session you open instead.
 
     ws.on('message', async (data) => {
       try {
         const msg: WsInboundMessage = JSON.parse(data.toString());
-        await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner);
+        const reply = (out: WsOutboundMessage) => { try { ws.send(JSON.stringify(out)); } catch { /* client went away */ } };
+        await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, reply);
       } catch (err: any) {
         console.error('[WS] Error handling message:', err);
         ws.send(JSON.stringify({
@@ -109,13 +153,14 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       }
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code: number) => {
       clients.delete(ws);
-      console.log(`[WS] Client disconnected (${clients.size} total)`);
+      console.log(`[WS] Client disconnected (${clients.size} total) — ${ip} ${uaTag} code=${code}`);
     });
   });
 
-  return { wss, broadcast };
+  // getClientCount feeds the hourly health snapshot in index.ts.
+  return { wss, broadcast, getClientCount: () => clients.size };
 }
 
 async function handleMessage(
@@ -124,11 +169,34 @@ async function handleMessage(
   broadcast: (msg: WsOutboundMessage) => void,
   getTriggers: () => TriggerManager,
   getProjectRunner: () => import('./project-runner.js').ProjectRunner,
+  getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner,
+  getTags: () => TagManager,
+  getUiState: () => UiStateManager,
+  /** Send to the requesting client only (not a broadcast). */
+  reply: (msg: WsOutboundMessage) => void,
 ) {
+  // Single chokepoint for feature-usage logging — every inbound action passes through here.
+  // 'ping' is a pure heartbeat with no feature signal, so it's excluded. 'log_event' is the
+  // client's generic channel for pure-navigation actions (tab switches, modal opens) that
+  // never otherwise reach the server — log under its own feature name, not the literal type.
+  if (msg.type === 'log_event') {
+    logUsage(String(msg.feature).slice(0, 60), msg.detail);
+  } else if (msg.type !== 'ping' && msg.type !== 'mark_read') {
+    logUsage(msg.type, safeDetail(msg));
+  }
+
   switch (msg.type) {
     case 'create_session': {
       try {
-        sessionManager.createSession(msg.config);
+        // "New project": the client sends only a folder name and the server decides where it
+        // goes (the dev root) — config.cwd is replaced on this path, never trusted.
+        let config = msg.config;
+        if (msg.projectFolder) {
+          const folder = ensureProjectFolder(msg.projectFolder);
+          if (folder.created) console.log(`[Projects] Created ${folder.path}`);
+          config = { ...config, cwd: folder.path };
+        }
+        sessionManager.createSession(config);
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: '', message: err.message });
       }
@@ -137,7 +205,133 @@ async function handleMessage(
 
     case 'send_message': {
       try {
-        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode, files: msg.files });
+        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode, files: msg.files, model: msg.model, effort: msg.effort });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'set_goal': {
+      try {
+        sessionManager.setGoal(msg.sessionId, msg.goal);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'set_notes': {
+      try {
+        sessionManager.setNotes(msg.sessionId, msg.notes);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'set_pinned': {
+      try {
+        sessionManager.setPinned(msg.sessionId, msg.pinned);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'request_history': {
+      // The session list carries only recent messages (client-view.ts); the browser asks for the
+      // rest when you actually open a session.
+      try {
+        const session = sessionManager.getSession(msg.sessionId);
+        if (session) reply({ type: 'session_history', sessionId: msg.sessionId, messages: toClientHistory(session.getState()) });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'request_debug_log': {
+      // The session list leaves debug logs out (client-view.ts); a session's Debug tab asks here.
+      const session = sessionManager.getSession(msg.sessionId);
+      if (session) reply({ type: 'session_debug_log', sessionId: msg.sessionId, entries: session.getState().debugLog });
+      break;
+    }
+
+    // Cross-device view state (ui-state.ts). Ids of sessions that don't exist are ignored.
+    case 'mark_read': {
+      if (sessionManager.getSession(msg.sessionId)) getUiState().markRead(msg.sessionId);
+      break;
+    }
+
+    case 'set_tab_closed': {
+      if (sessionManager.getSession(msg.sessionId)) getUiState().setTabClosed(msg.sessionId, !!msg.closed);
+      break;
+    }
+
+    case 'set_pin_order': {
+      if (Array.isArray(msg.ids)) getUiState().setPinOrder(msg.ids);
+      break;
+    }
+
+    case 'merge_ui_state': {
+      getUiState().merge(msg.state);
+      break;
+    }
+
+    case 'set_tags': {
+      try {
+        // Drop ids the registry doesn't know about (stale client / deleted tag).
+        const valid = msg.tags.filter(id => getTags().has(id));
+        sessionManager.setTags(msg.sessionId, valid);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'create_tag': {
+      try {
+        getTags().create({ label: msg.label, color: msg.color });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: '', message: err.message });
+      }
+      break;
+    }
+
+    case 'update_tag': {
+      try {
+        getTags().update(msg.id, { label: msg.label, color: msg.color });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: '', message: err.message });
+      }
+      break;
+    }
+
+    case 'delete_tag': {
+      try {
+        if (getTags().delete(msg.id)) {
+          // Cascade: strip the deleted tag from every session that carries it.
+          sessionManager.removeTagFromAllSessions(msg.id);
+        }
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: '', message: err.message });
+      }
+      break;
+    }
+
+    case 'pin_message': {
+      try {
+        sessionManager.setMessagePinned(msg.sessionId, msg.messageId, msg.pinned);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'stop_model_plan': {
+      try {
+        sessionManager.stopModelPlan(msg.sessionId);
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
@@ -148,12 +342,41 @@ async function handleMessage(
       try {
         const session = sessionManager.getSession(msg.sessionId);
         if (!session) throw new Error('Session not found');
-        // Send the user's decision as a regular message; Claude will see it as a follow-up turn
-        const followUp = msg.decision === 'accept'
-          ? `Plan approved. Proceed with the plan as described.${msg.feedback ? `\n\nAdditional note: ${msg.feedback}` : ''}`
-          : `Plan rejected. ${msg.feedback || 'Please reconsider the approach and propose an alternative.'}`;
-        broadcast({ type: 'plan_resolved', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
-        await sessionManager.sendMessage(msg.sessionId, followUp);
+
+        // Custom Plan: on accept, try to pull the machine-readable clauder-steps block out
+        // of the plan text and start a model plan directly — no extra turn on the (expensive)
+        // planning model. Any failure to find/parse a valid block degrades to the legacy
+        // "Plan approved..." message; an accept must never hard-fail.
+        // Clear the pending-plan snapshot state on either decision so the banner drops on
+        // every connected client (incl. reconnecting ones) once the plan is resolved.
+        session.pendingPlan = null;
+        if (msg.decision === 'accept') {
+          const planText = session.lastPlanText;
+          session.lastPlanText = null;
+          const stepsBlock = planText ? /```clauder-steps\s*([\s\S]*?)```/.exec(planText) : null;
+          let steps: unknown[] | null = null;
+          if (stepsBlock) {
+            try {
+              const parsed = JSON.parse(stepsBlock[1].trim());
+              if (Array.isArray(parsed.steps) && parsed.steps.length > 0) steps = parsed.steps;
+            } catch {
+              // malformed JSON — fall through to legacy behavior below
+            }
+          }
+          broadcast({ type: 'plan_resolved', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
+          if (steps) {
+            session.setModelPlan(steps);
+            getModelPlanRunner().kickstartActivePlans();
+          } else {
+            const followUp = `Plan approved. Proceed with the plan as described.${msg.feedback ? `\n\nAdditional note: ${msg.feedback}` : ''}`;
+            await sessionManager.sendMessage(msg.sessionId, followUp);
+          }
+        } else {
+          session.lastPlanText = null;
+          const followUp = `Plan rejected. ${msg.feedback || 'Please reconsider the approach and propose an alternative.'}`;
+          broadcast({ type: 'plan_resolved', sessionId: msg.sessionId, toolUseId: msg.toolUseId });
+          await sessionManager.sendMessage(msg.sessionId, followUp);
+        }
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
@@ -202,6 +425,19 @@ async function handleMessage(
         // Also clean up any triggers tied to this session
         getTriggers().removeSessionTriggers(msg.sessionId);
       } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'archive_session': {
+      logUsage('archive_session', { sessionId: msg.sessionId });
+      try {
+        await sessionManager.archiveSession(msg.sessionId);
+        // Same cleanup destroy_session does — archiveSession destroys the session internally.
+        getTriggers().removeSessionTriggers(msg.sessionId);
+      } catch (err: any) {
+        broadcast({ type: 'archive_status', sessionId: msg.sessionId, stage: 'error', message: err.message });
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
       break;
@@ -360,6 +596,15 @@ async function handleMessage(
       break;
     }
 
+    case 'stop_monitor': {
+      try {
+        sessionManager.stopMonitor(msg.sessionId, msg.monitorId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
     case 'apply_claude_md_candidate': {
       try {
         const session = sessionManager.getSession(msg.sessionId);
@@ -393,6 +638,55 @@ async function handleMessage(
       }
       break;
     }
+
+    case 'park_thread': {
+      try {
+        sessionManager.parkThread(msg.sessionId, msg.name);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'resume_thread': {
+      try {
+        sessionManager.resumeThread(msg.sessionId, msg.threadId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'discard_thread': {
+      try {
+        sessionManager.discardThread(msg.sessionId, msg.threadId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'start_task': {
+      try {
+        sessionManager.startTask(msg.sessionId, { name: msg.name, model: msg.model, effort: msg.effort });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'rename_thread': {
+      try {
+        sessionManager.renameThread(msg.sessionId, msg.threadId, msg.name);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    case 'log_event':
+      // Already logged above — no other action needed
+      break;
 
     case 'ping':
       // Client keepalive — no-op

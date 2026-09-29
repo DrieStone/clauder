@@ -1,7 +1,11 @@
 import { ManagedSession } from './session.js';
-import type { SessionConfig, SessionState, PermissionMode, ImageAttachment, FileAttachment } from '@clauder/shared';
+import type { SessionConfig, SessionState, PermissionMode, ImageAttachment, FileAttachment, EffortLevel } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
-import { saveSessions, loadSessions } from './persistence.js';
+import { toClientState } from './client-view.js';
+import { saveSessions, loadSessions, type SessionStateForPersist } from './persistence.js';
+import { archiveSession as runArchive, type ArchiveStage } from './archive.js';
+import { existsSync } from 'fs';
+import { DEFAULT_MODEL } from './models.js';
 
 const MAX_SESSIONS = 100;
 const SUMMARY_DELAY_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -13,9 +17,21 @@ export class SessionManager {
   private pauseUntil: string | null = null;
   private pauseTimer: ReturnType<typeof setTimeout> | null = null;
   private summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Sessions already warned about a missing cwd (unmounted volume etc.) — log once, not per cycle. */
+  private warnedMissingCwd = new Set<string>();
+  private triggerCreator: ((input: { sessionId: string; message: string; description: string; at: string }) => void) | null = null;
 
   constructor(broadcast: (msg: WsOutboundMessage) => void) {
     this.broadcast = broadcast;
+  }
+
+  /** Wire up trigger creation so sessions can schedule themselves via <<schedule_trigger>> sentinels. */
+  setTriggerCreator(fn: (input: { sessionId: string; message: string; description: string; at: string }) => void): void {
+    this.triggerCreator = fn;
+    // Apply to existing sessions (e.g. restored sessions)
+    for (const session of this.sessions.values()) {
+      session.onScheduleTrigger = fn;
+    }
   }
 
   /** Restore sessions from disk. Call once at startup after broadcast is wired. */
@@ -27,6 +43,7 @@ export class SessionManager {
     for (const data of persisted) {
       try {
         const session = ManagedSession.restore(data, this.broadcast);
+        if (this.triggerCreator) session.onScheduleTrigger = this.triggerCreator;
         this.sessions.set(session.id, session);
         console.log(`  - Restored: ${data.config.name} (${data.id})`);
         // Schedule summary if session has been idle long enough and has no summary
@@ -41,18 +58,26 @@ export class SessionManager {
     // Debounce saves to avoid hammering disk during rapid updates
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      saveSessions(this.getAllSessions());
+      saveSessions(this.getAllSessionsForPersist());
     }, 500);
   }
 
   /** Force an immediate save (e.g. before shutdown) */
   persistNow(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
-    saveSessions(this.getAllSessions());
+    saveSessions(this.getAllSessionsForPersist());
   }
 
   getAllSessions(): SessionState[] {
     return Array.from(this.sessions.values()).map(s => s.getState());
+  }
+
+  /** Same as getAllSessions() but with full ParkedThread[] (message bodies included) instead of
+   *  the lightweight ThreadSummary[] the client sees — getState() intentionally keeps parked
+   *  message content off the wire, but the disk copy needs it to resume a thread after a
+   *  restart. See SessionStateForPersist. */
+  private getAllSessionsForPersist(): SessionStateForPersist[] {
+    return Array.from(this.sessions.values()).map(s => ({ ...s.getState(), threads: s.threads }));
   }
 
   getSession(id: string): ManagedSession | undefined {
@@ -66,23 +91,27 @@ export class SessionManager {
       throw new Error(`Maximum of ${MAX_SESSIONS} sessions reached`);
     }
 
-    // Strip surrounding quotes from cwd (common copy-paste artifact)
+    // Strip surrounding quotes from cwd (common copy-paste artifact). Every session gets a model:
+    // without one the CLI runs its own default while the picker shows Clauder's (adopting a VS
+    // Code session sends none).
     const sanitizedConfig = {
       ...config,
       cwd: config.cwd.replace(/^['"](.*)['"]$/, '$1').trim(),
+      model: config.model || DEFAULT_MODEL,
     };
 
     const session = new ManagedSession(sanitizedConfig, this.broadcast);
+    if (this.triggerCreator) session.onScheduleTrigger = this.triggerCreator;
     this.sessions.set(session.id, session);
 
     const state = session.getState();
-    this.broadcast({ type: 'session_created', session: state });
+    this.broadcast({ type: 'session_created', session: toClientState(state) });
     session.broadcastSkills();
     this.persist();
     return state;
   }
 
-  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[] }): Promise<void> {
+  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: string }): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
@@ -95,7 +124,7 @@ export class SessionManager {
     }
 
     // Don't await - let it run in the background while streaming events
-    session.sendMessage(message, images, opts).then(() => {
+    session.sendMessage(message, images, opts && { ...opts, effort: opts.effort as EffortLevel | undefined }).then(() => {
       this.persist();
       this.scheduleSummary(sessionId);
     }).catch(err => {
@@ -137,6 +166,44 @@ export class SessionManager {
     this.persist();
   }
 
+  parkThread(sessionId: string, name?: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    console.log(`[SessionManager] Parking thread for session ${sessionId}`);
+    session.parkThread(name);
+    this.persist();
+  }
+
+  resumeThread(sessionId: string, threadId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    console.log(`[SessionManager] Resuming thread ${threadId} for session ${sessionId}`);
+    session.resumeThread(threadId);
+    this.persist();
+  }
+
+  discardThread(sessionId: string, threadId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.discardThread(threadId);
+    this.persist();
+  }
+
+  renameThread(sessionId: string, threadId: string, name: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.renameThread(threadId, name);
+    this.persist();
+  }
+
+  startTask(sessionId: string, opts: { name: string; model?: string; effort?: string }): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    console.log(`[SessionManager] Starting task "${opts.name}" for session ${sessionId}`);
+    session.startTask({ name: opts.name, model: opts.model, effort: opts.effort as EffortLevel | undefined });
+    this.persist();
+  }
+
   dequeueMessage(sessionId: string, index: number): void {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -166,6 +233,23 @@ export class SessionManager {
     if (summaryTimer) { clearTimeout(summaryTimer); this.summaryTimers.delete(sessionId); }
     this.broadcast({ type: 'session_destroyed', sessionId });
     this.persist();
+  }
+
+  /** Archive a project: AI wrap-up → zip → verify → move the project dir to Trash → destroy
+   *  the session. See archive.ts for THE SAFETY INVARIANT — the directory is only ever touched
+   *  after a verified zip exists. Returns the final zip path. */
+  async archiveSession(sessionId: string): Promise<string> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    const others = [...this.sessions.values()].filter(s => s.id !== sessionId);
+    const { zipPath } = await runArchive(session, others, (stage: ArchiveStage, message: string) => {
+      this.broadcast({ type: 'archive_status', sessionId, stage, message });
+    });
+    await this.destroySession(sessionId); // removes from map, persists, broadcasts session_destroyed
+    this.broadcast({ type: 'archive_complete', sessionId, zipPath });
+    return zipPath;
   }
 
   async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
@@ -216,11 +300,73 @@ export class SessionManager {
     this.persist();
   }
 
+  setGoal(sessionId: string, goal: { text: string; checkEveryMin?: number; deadlineHours?: number; maxNudges?: number } | null): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setGoal(goal);
+    this.persist();
+  }
+
+  setNotes(sessionId: string, notes: string | null): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setNotes(notes);
+    this.persist();
+  }
+
+  setPinned(sessionId: string, pinned: boolean): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setPinned(pinned);
+    this.persist();
+  }
+
+  setTags(sessionId: string, tags: string[]): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setTags(tags);
+    this.persist();
+  }
+
+  /** Strip a deleted tag id from every session that carries it (delete cascade from the tag
+   *  registry). Persists once at the end. */
+  removeTagFromAllSessions(tagId: string): void {
+    let changed = false;
+    for (const session of this.sessions.values()) {
+      const tags = session.config.tags;
+      if (tags && tags.includes(tagId)) {
+        session.setTags(tags.filter(t => t !== tagId));
+        changed = true;
+      }
+    }
+    if (changed) this.persist();
+  }
+
+  stopModelPlan(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.stopModelPlan();
+    this.persist();
+  }
+
+  setMessagePinned(sessionId: string, messageId: string, pinned: boolean): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.setMessagePinned(messageId, pinned);
+    this.persist();
+  }
+
   cancelWakeup(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
     session.cancelWakeup();
     this.persist();
+  }
+
+  stopMonitor(sessionId: string, monitorId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.monitors.stop(monitorId, false);
   }
 
   async generateSessionSummary(sessionId: string): Promise<void> {
@@ -262,7 +408,23 @@ export class SessionManager {
       const s = this.sessions.get(sessionId);
       if (!s) return;
       const elapsed = Date.now() - new Date(s.lastActiveAt).getTime();
-      if (elapsed >= SUMMARY_DELAY_MS) {
+      // Skip when the existing summary already covers all activity — without this, every
+      // server restart regenerated a summary for EVERY restored idle session (36 CLI spawns
+      // in a row in the log), even though nothing had changed since the last one.
+      const summaryCurrent = !!s.summaryGeneratedAt
+        && new Date(s.summaryGeneratedAt).getTime() >= new Date(s.lastActiveAt).getTime();
+      // Skip (with a once-per-run warning) when the cwd is gone — e.g. a session on an
+      // unmounted network volume. Spawning would just throw "Working directory does not
+      // exist" on every cycle, which is exactly the retry-forever spam seen in prod.
+      if (!existsSync(s.config.cwd)) {
+        if (!this.warnedMissingCwd.has(sessionId)) {
+          this.warnedMissingCwd.add(sessionId);
+          console.warn(`[SessionManager] Skipping summaries for "${s.config.name}" (${sessionId}) — cwd missing: ${s.config.cwd} (volume unmounted?)`);
+        }
+        return;
+      }
+      this.warnedMissingCwd.delete(sessionId); // cwd is back — allow future warnings if it vanishes again
+      if (elapsed >= SUMMARY_DELAY_MS && !summaryCurrent) {
         console.log(`[SessionManager] Generating summary for session ${sessionId}`);
         this.generateSessionSummary(sessionId).catch(err => {
           console.error(`[SessionManager] Summary generation failed for ${sessionId}:`, err);

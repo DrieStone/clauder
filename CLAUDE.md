@@ -56,6 +56,35 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     (`five_hour` / `seven_day` utilization + `resetsAt`).
   - `task-classifier.ts` — out-of-band Haiku call to detect new-task context
     switches (for auto-compact).
+  - `client-view.ts` — what the browser gets, as opposed to what the server holds:
+    `toClientState()` trims each session to its last `LIST_MESSAGE_TAIL` messages (+ real
+    `messageCount`), swaps attachment blobs for `/api/attachments/...` URLs, and leaves out debug
+    logs (a session's Debug tab fetches its own with `request_debug_log`). The connect
+    payload was **66 MB** before this. Full history arrives via the `request_history` WS
+    message when a session is opened. `getAllSessions()` stays full-fidelity — server-side
+    search and the MCP endpoints read it.
+  - `task-roster.ts` — tasks (the task selector; server-side these are parked threads): each
+    task is its own CLI conversation carrying its own model/effort, restored on switch-back so
+    it keeps its prompt cache. Tasks are only *lightly* aware of each other: one fixed
+    system-prompt sentence points at `~/.clauder/task-rosters/<sessionId>.md`, rewritten on every
+    task change; Claude reads it on demand. Never push task info into a conversation or edit the
+    system prompt per switch — either would invalidate the prompt cache.
+  - `tags.ts` — `TagManager`: the registry of user-defined colored session tags
+    (`{id,label,color}`), persisted to `~/.clauder/tags.json` (atomic write,
+    TriggerManager-style). Broadcasts the full snapshot on any CRUD. Sessions
+    reference tags by id in `SessionConfig.tags`; deleting a tag cascades via
+    `SessionManager.removeTagFromAllSessions`.
+  - `projects.ts` — the new-session form's **New project** option: `ensureProjectFolder()` creates
+    (or reuses) a folder by name directly inside the dev root (`~/development`; override with
+    `CLAUDER_DEV_ROOT`), and `GET /api/projects` lists what's already there. The client sends only
+    a name (`create_session.projectFolder`) and the server picks the path. The name rules live in
+    shared `project-folder.ts` so the form and the server agree.
+  - `ui-state.ts` — `UiStateManager`: view state that follows Jonathan across devices — when each
+    session was last read, tabs closed from the tab menu, and pinned-tab order — persisted to
+    `~/.clauder/ui-state.json` (TagManager-style, saves debounced 1s) and broadcast as a full
+    `ui_state` snapshot on every change. Times use the server clock so they compare cleanly with
+    `lastActiveAt`. Each browser merges its old localStorage copy up once (`merge_ui_state`), and
+    keeps using it until a syncing server sends its first snapshot.
 - `packages/mcp-server/src/index.ts` — MCP tools for controller sessions:
   `list_sessions`, `send_message`, `wait_until_idle`, `get_recent_messages`,
   `get_session_status`, `add_watch`, `list_watches`, `remove_watch`,
@@ -67,8 +96,8 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
   `RateLimitBar.tsx` (real subscription %).
 - `packages/client/src/lib/notifications.ts` — browser Notification API.
 - `~/.clauder/` (outside repo) — runtime state: `auth-token`, `sessions.json`,
-  `sessions.json.bak`, `project-runs.json`, `triggers.json`, `clauder.log`,
-  `backups/`, `mcp-configs/`.
+  `sessions.json.bak`, `project-runs.json`, `triggers.json`, `tags.json`, `ui-state.json`,
+  `task-rosters/`, `clauder.log`, `backups/`, `mcp-configs/`.
 
 ## How sessions work (non-obvious)
 
@@ -145,6 +174,21 @@ with no path to clear it = stuck session.
 9. **Build before restart.** After editing TS, run `npm run build` before
    `launchctl kickstart -k gui/$(id -u)/com.jsweet.clauder`.
 
+10. **Upgrading a model is a three-part change — never just swap the
+    picker.** A session persists the model ID it was configured with, so an
+    ID dropped from `MODELS` keeps running in every session already pinned to
+    it while the UI shows something else. Always: (a) add the new ID to
+    `MODELS` in `ModelEffortSelector.tsx` and to `session.ts`'s two guidance
+    blocks, and if it's the new default, `DEFAULT_MODEL` in both `models.ts`
+    and `ModelEffortSelector.tsx`; (b) map **every** ID it replaces to it in
+    `RETIRED_MODELS` (`models.ts`) — `ManagedSession.restore` rewrites session
+    config, parked tasks, and pinned model-plan steps on load; (c) leave the
+    old labels in the label maps (`SessionView.tsx`, `RateLimitBar.tsx`,
+    `PlanBanner.tsx`) so past cost rows and plan banners still read right.
+    Then check `~/.clauder/sessions.json` for IDs no longer in `MODELS` and
+    map those too. The picker shows an unmapped ID greyed, as itself — it must
+    never name a model the session isn't running.
+
 ## Overnight Project Runner
 
 `ProjectRunner` (`project-runner.ts`) drives autonomous coding runs:
@@ -199,8 +243,26 @@ tail -f ~/.clauder/clauder.log
 - `~/Documents/Clauder Controller/` — separate companion project.
 - `~/Documents/Clauder/` — **stale fork**. Do not edit. Slated for deletion.
 - `~/.clauder/` — runtime state (not in repo).
-- Underlying Claude Code CLI: `@anthropic-ai/claude-code` v2.1.162.
+- Underlying Claude Code CLI: `@anthropic-ai/claude-code` v2.1.284.
 
 ## Discovered during sessions
-- AskUserQuestion auto-fails in headless CLI mode; deliver answers as queue-jumping messages, not stdin tool_results.
-- Claude Code sessions run AS CHILD PROCESSES of Clauder. Running `launchctl kickstart -k` from inside a Clauder session kills the server, which kills the session mid-turn — causing an apparent "interruption". Never attempt a kickstart from within Clauder; instruct Jonathan to run it in a standalone terminal instead.
+- Headless `--print` mode disables AskUserQuestion and ExitPlanMode: sessions must ask questions in plain text (answers to already-pending questions are delivered as queue-jumping messages, not stdin tool_results), and plans are detected via the clauder-steps text block, not the tool call.
+- Claude Code sessions run as child processes of the Clauder server, so `launchctl kickstart -k` kills the server *and* any session running inside it mid-turn (looks like a random "interruption") — always restart from a standalone terminal, never from inside a Clauder session.
+- ANTHROPIC_API_KEY is unset in prod; task-classifier.ts auto-compact silently no-ops — use CLI-subprocess pattern, not the API, for out-of-band LLM calls.
+- Model choice: **Opus 5.5 (`claude-opus-5-5`) is the only Opus on offer** — $4/$20 per Mtok with $0.20/Mtok cache reads, against Opus 5's $5/$25 and ~$0.50 cache reads. That gap matters because re-reading context dominates long agentic turns (a measured AutoEdit turn: 10.8M cache-read tokens, 63% of its cost). Opus 5 and Opus 4.8 were retired from the picker, along with the older `claude-opus-4-6` / `claude-sonnet-4-6` / `claude-fable-5` pins and the bare `opus` / `sonnet` / `haiku` aliases — all mapped forward in `models.ts`. See hard rule 10 for the checklist. Session default is Sonnet 5.5 (`claude-sonnet-5-5`, `DEFAULT_MODEL` in `models.ts` and `ModelEffortSelector.tsx`): it replaced Sonnet 5 on Sep 29, 2026 at the same $2/$10 price, and `claude-sonnet-5` maps forward to it.
+- Steer sessions to Clauder-native scheduling and monitoring: <<schedule_trigger>> + ScheduleWakeup instead of CLI/cron, and the <<monitor>> sentinel (MonitorController) instead of the headless-broken CLI Monitor tool. --append-system-prompt reaches only the top-level session, not Task sub-agents, so the parent session must own all scheduling/monitoring.
+- Hover-only controls (`opacity-0 group-hover:opacity-100`) are invisible on phones — gate the hiding behind Tailwind's `[@media(hover:hover)]:` variant so touch devices still see them.
+- Phone and browser JS crashes are logged in ~/.clauder/clauder.log on lines containing client:mobile — check there first.
+- CLAUDE.md candidate text must not contain a closing square bracket; the extractor truncates at the first one.
+- Per-model cost comparisons come from ~/.clauder/cost-ledger.json — there is no local price table
+- To re-price cost-ledger turns from tokens, charge cache writes at 2x input and count thinking inside output
+- Older clauder.log lines lack timestamps; bound log searches by line number from a known timestamp, not string comparison
+- The CLI deletes transcripts idle past cleanupPeriodDays, default 30; resuming then fails with No conversation found
+- Opus 5.5 and Sonnet 5.5 send between-tool progress notes as thinking blocks, not text blocks
+- When changing a model ID, grep for the old ID; SCRATCH_MODEL, DEFAULT_EXECUTOR_MODEL, CLAUDE_CODE_SUBAGENT_MODEL and TaskSelector hardcode it too
+- Every session gets a model: createSession and restore() fill in DEFAULT_MODEL, since with no --model flag the CLI runs its own default while the picker shows Clauder's
+- Clauder shows thinking-block text as muted progress notes (UIMessage.thinking); sentinels, CLAUDE.md candidates and error sniffs read text blocks only
+- CLAUDE_CODE_SUBAGENT_MODEL only covers sub-agents launched without a model; named models and built-in Explore bypass it
+- Context-error auto-recovery must react only to CLI-written messages (is_api_error_message, model <synthetic>); matching Claude's own prose made a reply about the error loop
+- Client re-renders: per-message and per-card components use useSessionActions()/useTagRegistry() plus React.memo; any useSessions() inside re-renders them on every WS message
+- Animate only transform or opacity: the width/margin progress bar forced 60-120 page layouts a second, ~15% of the tab's CPU

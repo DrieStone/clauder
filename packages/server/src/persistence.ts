@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { SessionState, SessionOrigin, PendingWakeup } from '@clauder/shared';
+import type { SessionState, SessionOrigin, PendingWakeup, PendingPlan, ParkedThread } from '@clauder/shared';
+import { trimMessages } from '@clauder/shared';
 
 const CLAUDER_DIR = path.join(os.homedir(), '.clauder');
 const SESSIONS_FILE = path.join(CLAUDER_DIR, 'sessions.json');
@@ -18,10 +19,27 @@ export interface PersistedSession {
   summary?: string | null;
   summaryGeneratedAt?: string | null;
   compactedContext?: string | null;
+  notes?: string | null;
+  notesUpdatedAt?: string | null;
   pendingWakeup?: PendingWakeup | null;
+  /** A plan awaiting accept/reject, persisted so the banner survives a server restart (not just
+   *  WS reconnects). lastPlanText is rebuilt from pendingPlan.plan on restore. */
+  pendingPlan?: PendingPlan | null;
   createdAt: string;
   lastActiveAt: string;
+  /** Full parked-thread snapshots (messages included) — NOT the lightweight ThreadSummary[]
+   *  the client sees on SessionState.threads. See SessionStateForPersist. */
+  threads?: ParkedThread[];
+  activeThreadId?: string;
+  activeThreadName?: string | null;
 }
+
+/** What saveSessions() actually needs per session: the normal SessionState fields, PLUS the
+ *  full ParkedThread[] snapshots (with message bodies) that getState()/SessionState deliberately
+ *  omit from the client-facing `threads: ThreadSummary[]`. Callers build this by combining
+ *  session.getState() with the ManagedSession's own `.threads` field — see
+ *  SessionManager.getAllSessionsForPersist(). */
+export type SessionStateForPersist = Omit<SessionState, 'threads'> & { threads: ParkedThread[] };
 
 function ensureDir() {
   if (!fs.existsSync(CLAUDER_DIR)) {
@@ -41,6 +59,8 @@ function atomicWrite(file: string, data: string): void {
 const SESSIONS_BAK = `${SESSIONS_FILE}.bak`;
 
 const PERSIST_TOOL_RESULT_MAX = 2_000;
+/** Chat messages kept per session in sessions.json. Pinned messages are exempt — see trimMessages. */
+const PERSIST_MESSAGES_MAX = 50;
 
 const MAX_BACKUPS = 48; // ~8 hours at 10-minute intervals
 
@@ -66,7 +86,26 @@ export function backupSessions(): void {
   }
 }
 
-export function saveSessions(sessions: SessionState[]): void {
+/** Trim a message list for disk: cap the count (pinned messages exempt, see trimMessages) and
+ *  truncate each tool result's content. Shared between a session's live messages and each of
+ *  its parked threads' messages — same size concerns apply to both. */
+function trimMessagesForPersist(messages: SessionState['messages']): SessionState['messages'] {
+  return trimMessages(messages, PERSIST_MESSAGES_MAX).map((m) => ({
+    ...m,
+    toolUses: m.toolUses?.map((tu) => ({
+      ...tu,
+      result: tu.result ? {
+        ...tu.result,
+        content: tu.result.content.slice(0, PERSIST_TOOL_RESULT_MAX),
+        originalLength: tu.result.content.length > PERSIST_TOOL_RESULT_MAX
+          ? (tu.result.originalLength ?? tu.result.content.length)
+          : tu.result.originalLength,
+      } : undefined,
+    })),
+  }));
+}
+
+export function saveSessions(sessions: SessionStateForPersist[]): void {
   ensureDir();
   // Roll the current good file to a single rolling .bak before overwriting. This is the
   // near-current recovery source for loadSessions() if a write is ever corrupted. (We keep
@@ -85,27 +124,20 @@ export function saveSessions(sessions: SessionState[]): void {
     sdkSessionId: s.sdkSessionId,
     totalCostUsd: s.totalCostUsd,
     contextUsage: s.contextUsage,
-    messages: s.messages.slice(-50).map((m) => ({
-      ...m,
-      // Truncate tool result content for persistence
-      toolUses: m.toolUses?.map((tu) => ({
-        ...tu,
-        result: tu.result ? {
-          ...tu.result,
-          content: tu.result.content.slice(0, PERSIST_TOOL_RESULT_MAX),
-          originalLength: tu.result.content.length > PERSIST_TOOL_RESULT_MAX
-            ? (tu.result.originalLength ?? tu.result.content.length)
-            : tu.result.originalLength,
-        } : undefined,
-      })),
-    })),
+    messages: trimMessagesForPersist(s.messages),
     permissionMode: s.permissionMode,
     summary: s.summary,
     summaryGeneratedAt: s.summaryGeneratedAt,
     compactedContext: s.compactedContext,
+    notes: s.notes,
+    notesUpdatedAt: s.notesUpdatedAt,
     pendingWakeup: s.pendingWakeup,
+    pendingPlan: s.pendingPlan,
     createdAt: s.createdAt,
     lastActiveAt: s.lastActiveAt,
+    threads: s.threads.map((t) => ({ ...t, messages: trimMessagesForPersist(t.messages) })),
+    activeThreadId: s.activeThreadId,
+    activeThreadName: s.activeThreadName,
   }));
   atomicWrite(SESSIONS_FILE, JSON.stringify(persisted, null, 2));
 }

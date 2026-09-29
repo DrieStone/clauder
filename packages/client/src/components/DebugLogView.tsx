@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { useSessionActions } from '../context/SessionContext';
 import type { DebugLogEntry, DebugLogEntryType } from '@clauder/shared';
 
 const TYPE_COLORS: Record<DebugLogEntryType, string> = {
@@ -18,7 +19,13 @@ const FILTER_OPTIONS: { value: DebugLogEntryType | 'all'; label: string }[] = [
   { value: 'api_error', label: 'API Error' },
 ];
 
-export function DebugLogView({ entries }: { entries: DebugLogEntry[] }) {
+export function DebugLogView({ entries, sessionId }: { entries: DebugLogEntry[]; sessionId: string }) {
+  // The session list doesn't carry debug logs: fetch this session's, and keep it live, while open.
+  const { watchDebugLog } = useSessionActions();
+  useEffect(() => {
+    watchDebugLog(sessionId);
+    return () => watchDebugLog(null);
+  }, [sessionId, watchDebugLog]);
   const [filter, setFilter] = useState<DebugLogEntryType | 'all'>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);

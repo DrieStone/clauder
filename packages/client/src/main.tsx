@@ -1,10 +1,28 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
+import { ErrorBoundary, AppCrashScreen } from './components/ErrorBoundary';
+import { reportClientError } from './lib/clientLog';
 import './styles/globals.css';
+
+// Forward uncaught browser errors to the server log (/api/client-log → `[client:mobile]` lines in
+// ~/.clauder/clauder.log). The browser had zero telemetry before this — every mobile bug was
+// diagnosed blind from screenshots. Dedupe and rate-limiting live in lib/clientLog.
+window.addEventListener('error', (e) => {
+  reportClientError(e.message || 'Unknown error', e.error?.stack);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r: unknown = e.reason;
+  if (r instanceof Error) reportClientError(`Unhandled rejection: ${r.message}`, r.stack);
+  else reportClientError(`Unhandled rejection: ${String(r).slice(0, 200)}`);
+});
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    {/* Without a boundary, one render error unmounts the whole app and a home-screen install is
+        left on a black screen whose only exit is force-quitting (the image-viewer pan crash). */}
+    <ErrorBoundary label="app" fallback={(error) => <AppCrashScreen error={error} />}>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );
