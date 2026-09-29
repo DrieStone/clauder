@@ -268,12 +268,36 @@ export interface QueuedMessage {
    *  message queued while busy still runs on the chosen model when it drains. */
   model?: string;
   effort?: string;
+  /** A guest's message waiting its turn keeps its attribution. */
+  author?: MessageAuthor;
+}
+
+/** Who wrote a user message that didn't come from the session's owner: a guest on a share link. */
+export interface MessageAuthor {
+  name: string;
+  shareId: string;
+}
+
+/** A link that shares one session with one named guest on the local network (shares.ts). The
+ *  token is the link's secret; the owner sees it, guests never see anyone's. */
+export interface ShareLink {
+  id: string;
+  token: string;
+  sessionId: string;
+  /** Who it's for. Claude is told this name with each of their messages. */
+  guestName: string;
+  /** The owner's limits for this guest, passed to Claude with each of their messages. */
+  rules: string;
+  createdAt: string;
+  lastUsedAt: string | null;
 }
 
 export interface UIMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  /** Set when a guest on a share link wrote it; absent for the owner (and for assistant/system). */
+  author?: MessageAuthor;
   images?: ImageAttachment[];
   files?: FileAttachment[];
   toolUses?: ToolUseInfo[];

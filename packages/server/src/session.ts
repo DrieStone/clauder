@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { saveUpload, saveFileUpload } from './uploads.js';
 import { homedir } from 'os';
 import type { ChildProcess } from 'child_process';
-import type { SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, EffortLevel, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, PendingPlan, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType, RateLimitWindow, GoalState, ModelPlan, ModelPlanStep, MonitorInfo, ParkedThread, ThreadSummary } from '@clauder/shared';
+import type { MessageAuthor, SessionConfig, SessionState, SessionStatus, SessionOrigin, PermissionMode, EffortLevel, UIMessage, ToolActivity, ToolUseInfo, ContextUsage, PendingPermission, PendingWakeup, PendingPlan, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, DebugLogEntryType, RateLimitWindow, GoalState, ModelPlan, ModelPlanStep, MonitorInfo, ParkedThread, ThreadSummary } from '@clauder/shared';
 import { trimMessages } from '@clauder/shared';
 import { toClientState } from './client-view.js';
 import { taskRosterPath, writeTaskRoster as writeRosterFile, removeTaskRoster } from './task-roster.js';
@@ -199,6 +199,9 @@ export class ManagedSession {
   private wakeupTimer: NodeJS.Timeout | null = null;
   /** Injected by SessionManager after construction. Called when Claude emits a <<schedule_trigger>> sentinel. */
   onScheduleTrigger: ((input: { sessionId: string; message: string; description: string; at: string }) => void) | null = null;
+  /** Injected by SessionManager: the note Claude reads ahead of a guest's message, saying who wrote
+   *  it and the owner's rules for them (shares.ts guestNote). */
+  describeAuthor: ((author: MessageAuthor) => string) | null = null;
   /** Server-side AskUserQuestion gate. Set when the model asks a question; cleared on
    *  answer, fresh user input, or timeout (after which the session proceeds on its own).
    *  Distinct from the client-side pendingQuestion, which drives the answer UI. */
@@ -614,8 +617,8 @@ export class ManagedSession {
   }
 
   /** Queue a message to be sent after the current turn finishes */
-  queueMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; files?: FileAttachment[]; model?: string; effort?: string }): void {
-    this.queuedMessages.push({ text: message, images: images?.length ? images : undefined, files: opts?.files?.length ? opts.files : undefined, internal: opts?.internal, model: opts?.model, effort: opts?.effort });
+  queueMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; files?: FileAttachment[]; model?: string; effort?: string; author?: MessageAuthor }): void {
+    this.queuedMessages.push({ text: message, images: images?.length ? images : undefined, files: opts?.files?.length ? opts.files : undefined, internal: opts?.internal, model: opts?.model, effort: opts?.effort, author: opts?.author });
     this.broadcast({
       type: 'queue_update',
       sessionId: this.id,
@@ -1548,12 +1551,15 @@ export class ManagedSession {
     return out.trim().toLowerCase().startsWith('yes');
   }
 
-  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: EffortLevel }): Promise<void> {
+  /** `author` marks a guest's message (share links). It must survive every path that re-sends a
+   *  message (queue, retry, auto-recovery, plan fallback): losing it would pass a guest's words to
+   *  Claude as the owner's. */
+  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: EffortLevel; author?: MessageAuthor }): Promise<void> {
     // If busy OR a task-switch classification is in flight, queue and bail.
     // Queueing while classifying preserves order: messages arriving during the
     // ~500ms Haiku call wait their turn instead of racing.
     if (this.status === 'working' || this.pendingTaskSwitch) {
-      this.queueMessage(message, images, { internal: opts?.internal, files: opts?.files, model: opts?.model, effort: opts?.effort });
+      this.queueMessage(message, images, { internal: opts?.internal, files: opts?.files, model: opts?.model, effort: opts?.effort, author: opts?.author });
       return;
     }
 
@@ -1604,7 +1610,7 @@ export class ManagedSession {
         this.broadcast({ type: 'assistant_message', sessionId: this.id, messageId: sysMsg.id, text: sysMsg.content });
         // Put the real message at the FRONT of the queue so it runs before any messages
         // that arrived during the classifier await. /compact runs first via recursion below.
-        this.queuedMessages.unshift({ text: message, images: images?.length ? images : undefined, internal: false });
+        this.queuedMessages.unshift({ text: message, images: images?.length ? images : undefined, internal: false, author: opts?.author });
         this.broadcast({ type: 'queue_update', sessionId: this.id, queue: [...this.queuedMessages] });
         await this.sendMessage('/compact', undefined, { internal: true });
         return;
@@ -1620,10 +1626,11 @@ export class ManagedSession {
       content: message,
       images: images?.length ? images : undefined,
       files: files?.length ? files : undefined,
+      author: opts?.author,
       timestamp: new Date().toISOString(),
     };
     this.messages.push(userMsg);
-    this.broadcast({ type: 'user_message_echo', sessionId: this.id, messageId: userMsgId, text: message, images: images?.length ? images : undefined, files: files?.length ? files : undefined });
+    this.broadcast({ type: 'user_message_echo', sessionId: this.id, messageId: userMsgId, text: message, images: images?.length ? images : undefined, files: files?.length ? files : undefined, author: opts?.author });
 
     // Update status
     this.status = 'working';
@@ -1857,7 +1864,9 @@ export class ManagedSession {
               .map(m => {
                 const content = typeof m.content === 'string' ? m.content : '[complex content]';
                 const truncated = content.length > 500 ? content.slice(0, 500) + '...' : content;
-                return `${m.role === 'user' ? 'User' : 'Assistant'}: ${truncated}`;
+                // A guest's message stays attributed here too, or it would read as the owner's.
+                const who = m.role === 'user' ? (m.author ? `${m.author.name} (a guest on a share link)` : 'User') : 'Assistant';
+                return `${who}: ${truncated}`;
               })
               .join('\n\n');
             contextParts.push(`## Recent conversation history\n${transcript}`);
@@ -1907,6 +1916,13 @@ export class ManagedSession {
         flags.push('--max-turns', String(this.config.maxTurns));
       }
 
+      // A guest's message reaches Claude behind a note saying who wrote it and the owner's rules
+      // for them (shares.ts). The note is for Claude only: the chat shows the guest's own words.
+      const attribution = opts?.author
+        ? (this.describeAuthor?.(opts.author) ?? `[Clauder: this message is from ${opts.author.name}, a guest, not from the session's owner.]`)
+        : null;
+      const cliMessage = attribution ? `${attribution}\n\n${message}` : message;
+
       // Build stdin message
       const files = opts?.files;
       let stdinPayload: string;
@@ -1952,7 +1968,7 @@ export class ManagedSession {
         const pathNote = noteLines.length ? '\n\n[' + noteLines.join('\n') + ']' : '';
 
         const defaultPrompt = images?.length ? 'What is in this image?' : 'Examine the attached file(s).';
-        const textContent = (message || defaultPrompt) + pathNote;
+        const textContent = (message ? cliMessage : defaultPrompt) + pathNote;
 
         const contentBlocks: any[] = [
           ...(images ?? []).map(img => ({
@@ -1969,7 +1985,7 @@ export class ManagedSession {
       } else {
         stdinPayload = JSON.stringify({
           type: 'user',
-          message: { role: 'user', content: message },
+          message: { role: 'user', content: cliMessage },
         });
       }
 
@@ -2864,7 +2880,7 @@ export class ManagedSession {
           // Remove the user message so sendMessage re-adds it
           this.messages = this.messages.filter(m => m.id !== lastUserMsg.id);
           this.status = 'idle';
-          return this.sendMessage(lastUserMsg.content, lastUserMsg.images);
+          return this.sendMessage(lastUserMsg.content, lastUserMsg.images, { author: lastUserMsg.author });
         }
       }
 
@@ -2918,7 +2934,7 @@ export class ManagedSession {
       // Fire and forget - the recursive call handles its own lifecycle.
       // Preserve the internal flag so programmatic messages (triggers/wakeups)
       // that were queued while busy still skip task-switch classification.
-      this.sendMessage(next.text, next.images, { internal: next.internal, files: next.files, model: next.model, effort: next.effort as EffortLevel | undefined }).catch(err => {
+      this.sendMessage(next.text, next.images, { internal: next.internal, files: next.files, model: next.model, effort: next.effort as EffortLevel | undefined, author: next.author }).catch(err => {
         console.error(`Error processing queued message for session ${this.id}:`, err);
       });
     }
@@ -2981,7 +2997,7 @@ export class ManagedSession {
     if (!lastUserMsg) return;
     this.messages = this.messages.filter(m => m.id !== lastUserMsg.id);
     this.status = 'idle';
-    this.sendMessage(lastUserMsg.content, lastUserMsg.images, { planMode: true }).catch(err => {
+    this.sendMessage(lastUserMsg.content, lastUserMsg.images, { planMode: true, author: lastUserMsg.author }).catch(err => {
       console.error(`[Session ${this.id}] Plan fallback retry failed: ${err.message}`);
     });
   }
@@ -3030,7 +3046,7 @@ export class ManagedSession {
     console.log(`[Session ${this.id}] Auto-recovering from 413 — resending: "${resendText.slice(0, 80)}..."`);
 
     // Re-send with primed context (wasReset is true, so sendMessage will inject compacted context)
-    this.sendMessage(resendText).catch(err => {
+    this.sendMessage(resendText, undefined, { author: lastUserMsg?.author }).catch(err => {
       console.error(`[Session ${this.id}] Auto-recovery failed:`, err.message);
       this.status = 'error';
       this.error = 'Auto-recovery from 413 failed. Click "Start Fresh" to try manually.';

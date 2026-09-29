@@ -6,6 +6,7 @@ import { SearchModal } from './components/SearchModal';
 import { useEffect, useCallback, useRef, useState } from 'react';
 import { onNotificationClick, markRead } from './lib/notifications';
 import { getScratchSession, getNonScratchSessions } from './lib/sessions';
+import { tailscaleOrigin } from './lib/hosts';
 
 /** Track the visual viewport: its height AND its offsetTop. Height alone is not enough on
  *  iOS: when the on-screen keyboard opens, iOS both (a) shrinks the visual viewport and
@@ -184,7 +185,66 @@ function AppContent() {
   );
 }
 
+/** Whether this device has owner access: the server decides (this Mac, Tailscale, or the owner
+ *  link; see server auth.ts). A server from before that check answers with the app shell, which
+ *  isn't JSON, and a network error changes nothing; both count as allowed. */
+function useOwnerAccess(): 'checking' | 'owner' | 'denied' {
+  const [access, setAccess] = useState<'checking' | 'owner' | 'denied'>('checking');
+  useEffect(() => {
+    fetch('/api/auth-check')
+      .then(r => r.json())
+      .then((j: { owner?: boolean }) => setAccess(j.owner === false ? 'denied' : 'owner'))
+      .catch(() => setAccess('owner'));
+  }, []);
+  return access;
+}
+
+/** Shown instead of the app on a Wi-Fi device without owner access (a guest on the same network
+ *  must not get the whole of Clauder). The owner's own devices get in via Tailscale, or by opening
+ *  the owner link once. */
+function NotSignedIn() {
+  const tailscale = tailscaleOrigin();
+  const [link, setLink] = useState('');
+  const go = () => {
+    const url = link.trim();
+    if (/\/owner\/[0-9a-f]{32,}/i.test(url)) window.location.href = url;
+  };
+  return (
+    <div className="h-dvh w-screen flex items-center justify-center bg-gray-950 text-gray-100 p-6">
+      <div className="w-full max-w-sm space-y-4">
+        <h1 className="text-lg font-semibold">This device isn't signed in to Clauder</h1>
+        <p className="text-sm text-gray-400">
+          Clauder opens on its own Mac and on your Tailscale devices automatically. Another device on
+          Wi-Fi needs your owner link once.
+        </p>
+        {tailscale && window.location.origin !== tailscale && (
+          <a href={tailscale} className="block text-center px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium">
+            Open over Tailscale
+          </a>
+        )}
+        <div>
+          <label className="text-xs text-gray-500" htmlFor="owner-link">Or paste your owner link</label>
+          <div className="flex gap-2 mt-1">
+            <input
+              id="owner-link"
+              value={link}
+              onChange={(e) => setLink(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') go(); }}
+              placeholder="http://JS.local:3001/owner/…"
+              className="flex-1 min-w-0 text-sm bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+            />
+            <button onClick={go} className="px-3 py-2 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-100">Go</button>
+          </div>
+        </div>
+        <p className="text-xs text-gray-500">Were you sent a link to one shared session? Open that link instead.</p>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
+  const access = useOwnerAccess();
+  if (access === 'denied') return <NotSignedIn />;
   return (
     <SessionProvider>
       <AppContent />

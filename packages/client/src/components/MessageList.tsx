@@ -3,6 +3,7 @@ import type { UIMessage } from '@clauder/shared';
 import { MessageBubble } from './MessageBubble';
 import { RichMarkdown } from './RichMarkdown';
 import { useSessionActions } from '../context/SessionContext';
+import { useGuestMode } from '../lib/guestMode';
 
 const NEAR_BOTTOM_PX = 80;
 
@@ -11,6 +12,7 @@ const NEAR_BOTTOM_PX = 80;
  *  expand/collapse state (defaults open) so several pins don't force each other in lockstep. */
 function PinnedMessage({ message, sessionId }: { message: UIMessage; sessionId: string }) {
   const { pinMessage } = useSessionActions();
+  const guestMode = useGuestMode();
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -24,9 +26,9 @@ function PinnedMessage({ message, sessionId }: { message: UIMessage; sessionId: 
           <button onClick={() => setExpanded(e => !e)} className="text-amber-400/80 hover:text-amber-200 text-[11px]">
             {expanded ? 'Hide' : 'Show'}
           </button>
-          <button onClick={() => pinMessage(sessionId, message.id, false)} className="text-amber-500/70 hover:text-amber-300 text-xs" title="Unpin">
+          {!guestMode && <button onClick={() => pinMessage(sessionId, message.id, false)} className="text-amber-500/70 hover:text-amber-300 text-xs" title="Unpin">
             ✕
-          </button>
+          </button>}
         </div>
       </div>
       {expanded && (

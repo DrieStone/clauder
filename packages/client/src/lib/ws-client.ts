@@ -19,6 +19,8 @@ export class WsClient {
   private reconnectDelay = 1000;
   private maxReconnectDelay = 30000;
   private destroyed = false;
+  /** Told each close code; returning true stops reconnecting for good (a revoked share link). */
+  private onClosed?: (code: number) => boolean;
 
   /** Accepts one or more candidate URLs (e.g. the current origin plus known alternate
    *  hostnames — see lib/hosts.ts). Tries them in order; on failure/timeout, rotates to the
@@ -29,6 +31,7 @@ export class WsClient {
     urls: string | string[],
     onMessage: WsMessageHandler,
     onStatusChange: (connected: boolean) => void,
+    onClosed?: (code: number) => boolean,
   ) {
     this.urls = Array.isArray(urls) ? [...urls] : [urls];
     if (this.urls.length === 0) throw new Error('WsClient requires at least one URL');
@@ -42,6 +45,7 @@ export class WsClient {
 
     this.onMessage = onMessage;
     this.onStatusChange = onStatusChange;
+    this.onClosed = onClosed;
   }
 
   connect() {
@@ -80,10 +84,14 @@ export class WsClient {
         }
       };
 
-      this.ws.onclose = () => {
+      this.ws.onclose = (event) => {
         if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
         this.clearPing();
         this.onStatusChange(false);
+        if (this.onClosed?.(event.code)) {
+          this.destroyed = true;
+          return;
+        }
         this.urlIndex++; // next retry rolls over to the next candidate host
         this.scheduleReconnect();
       };

@@ -8,6 +8,7 @@ import { PermissionModeSelector } from './PermissionModeSelector';
 import { FileBrowser } from './FileBrowser';
 import { DebugLogView } from './DebugLogView';
 import { GitIndicator } from './GitIndicator';
+import { ShareModal } from './ShareModal';
 import { ModelEffortSelector } from './ModelEffortSelector';
 import { TagControl, SessionTagChips, primaryTagColor } from './Tags';
 import { WakeupBanner } from './WakeupBanner';
@@ -70,6 +71,8 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   const [generatingSummary, setGeneratingSummary] = useState(false);
   const [authState, setAuthState] = useState<'idle' | 'waiting'>('idle');
   const [showQuickSchedule, setShowQuickSchedule] = useState(false);
+  const [showShare, setShowShare] = useState(false);
+  const shareCount = state.shares.filter(s => s.sessionId === session.id).length;
   // Tab right-click menu, closed tabs, pinned-tab order, and the pinned tab being dragged.
   const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const closedTabs = state.uiState.closedTabs;
@@ -385,6 +388,15 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
               Controller
             </span>
           )}
+          {shareCount > 0 && (
+            <button
+              onClick={() => setShowShare(true)}
+              className="text-[10px] text-teal-300 bg-teal-500/15 border border-teal-500/30 px-1.5 py-0.5 rounded shrink-0"
+              title="Shared with guests on your local network. Click to manage the links."
+            >
+              🔗 Shared{shareCount > 1 ? ` · ${shareCount}` : ''}
+            </button>
+          )}
         </div>
         <div className="order-3 sm:order-2 basis-full sm:basis-0 sm:flex-1 min-w-0 flex items-center gap-1.5 sm:gap-2 flex-wrap">
           <ModelEffortSelector
@@ -429,7 +441,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
               </span>
             )}
           </button>
-          <SessionSettingsMenu session={session} contextPct={contextPct} onBack={onBack} />
+          <SessionSettingsMenu session={session} contextPct={contextPct} onBack={onBack} onShare={() => setShowShare(true)} />
         </div>
       </div>
 
@@ -708,6 +720,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
         </div>
       )}
 
+      {showShare && <ShareModal session={session} onClose={() => setShowShare(false)} />}
       {showQuickSchedule && (
         <QuickScheduleModal
           sessionId={session.id}
@@ -1019,7 +1032,7 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
 /** Overflow "settings" menu in the session header — holds the less-frequently-used controls
  *  (permission mode, compact, destroy/clear) so the header can stay focused on model, goal,
  *  schedule, and the reset countdown. A gear button toggles a click-outside-dismissable popover. */
-function SessionSettingsMenu({ session, contextPct, onBack }: { session: SessionState; contextPct: number | null; onBack: () => void }) {
+function SessionSettingsMenu({ session, contextPct, onBack, onShare }: { session: SessionState; contextPct: number | null; onBack: () => void; onShare: () => void }) {
   const { compactSession, destroySession, clearSession, setPermissionMode, updateCwd, logEvent } = useSessions();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -1119,6 +1132,12 @@ function SessionSettingsMenu({ session, contextPct, onBack }: { session: Session
             </button>
           ) : (
             <>
+              <button
+                onClick={() => { onShare(); setOpen(false); }}
+                className="w-full text-left px-2 py-2 rounded text-xs text-teal-300 hover:bg-gray-700/60 transition-colors"
+              >
+                🔗 Share with someone…
+              </button>
               <button
                 onClick={() => { setShowArchiveConfirm(true); setOpen(false); }}
                 className="w-full text-left px-2 py-2 rounded text-xs text-amber-300 hover:bg-gray-700/60 transition-colors"

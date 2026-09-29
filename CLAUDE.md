@@ -50,7 +50,15 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     Persists to `~/.clauder/triggers.json`. Supports both `'once'` and
     `'recurring'` schedules. Has a `sessionExists` guard to disable orphaned
     triggers.
-  - `auth.ts` — token-based auth.
+  - `auth.ts` — who's connecting (`resolveAccess`), checked on every API request and WebSocket: the
+    owner (this Mac; a Tailscale device, both ends on Tailscale addresses; or a device that opened the
+    owner link `/owner/<token>` once, which sets a cookie), a share-link guest, or nobody. Being on
+    the Wi-Fi isn't owner access: guests are on that network too. `network.ts` classifies addresses.
+  - `shares.ts` + `guest-view.ts` — share links: one session per named guest, local network only,
+    until revoked (`~/.clauder/shares.json`). A guest connection gets only its session's events
+    (`forGuest`) and a sanitized copy of it (`toGuestState`), and may only watch, load history, send
+    messages and stop a turn. Each guest message reaches Claude behind `guestNote` (who wrote it and
+    the owner's rules for them); the chat keeps the guest's words with `UIMessage.author`.
   - `rate-limits.ts` — dual tracking: $-cost proxy (always available) +
     real subscription windows parsed from the CLI's `rate_limit_event`
     (`five_hour` / `seven_day` utilization + `resetsAt`).
@@ -271,3 +279,5 @@ tail -f ~/.clauder/clauder.log
 - Client re-renders: per-message and per-card components use useSessionActions()/useTagRegistry() plus React.memo; any useSessions() inside re-renders them on every WS message
 - Animate only transform or opacity: the width/margin progress bar forced 60-120 page layouts a second, ~15% of the tab's CPU
 - Pushes to GitHub can drop with unexpected disconnect while reading sideband packet; retry with git -c http.version=HTTP/1.1 push
+- Any path that re-sends a stored user message must pass its author, or a guest's words reach Claude as the owner's; the pause/resume drain once dropped it
+- Test with a throwaway server: HOME=/tmp/x PORT=3999 node packages/server/dist/index.js; lsof can't see listeners here, and a grep-based kill can match your own shell

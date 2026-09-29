@@ -1,5 +1,5 @@
 import { ManagedSession } from './session.js';
-import type { SessionConfig, SessionState, PermissionMode, ImageAttachment, FileAttachment, EffortLevel } from '@clauder/shared';
+import type { SessionConfig, SessionState, PermissionMode, ImageAttachment, FileAttachment, EffortLevel, MessageAuthor } from '@clauder/shared';
 import type { WsOutboundMessage } from '@clauder/shared';
 import { toClientState } from './client-view.js';
 import { saveSessions, loadSessions, type SessionStateForPersist } from './persistence.js';
@@ -20,6 +20,9 @@ export class SessionManager {
   /** Sessions already warned about a missing cwd (unmounted volume etc.) — log once, not per cycle. */
   private warnedMissingCwd = new Set<string>();
   private triggerCreator: ((input: { sessionId: string; message: string; description: string; at: string }) => void) | null = null;
+  /** Writes the note Claude reads ahead of a guest's message (shares.ts guestNote). */
+  private authorDescriber: ((author: MessageAuthor) => string) | null = null;
+  private destroyListeners: ((sessionId: string) => void)[] = [];
 
   constructor(broadcast: (msg: WsOutboundMessage) => void) {
     this.broadcast = broadcast;
@@ -34,6 +37,17 @@ export class SessionManager {
     }
   }
 
+  /** Wire up guest attribution for share links (index.ts), for every session now and later. */
+  setAuthorDescriber(fn: (author: MessageAuthor) => string): void {
+    this.authorDescriber = fn;
+    for (const session of this.sessions.values()) session.describeAuthor = fn;
+  }
+
+  /** Called with a session's id after it's destroyed, e.g. to revoke its share links. */
+  onSessionDestroyed(fn: (sessionId: string) => void): void {
+    this.destroyListeners.push(fn);
+  }
+
   /** Restore sessions from disk. Call once at startup after broadcast is wired. */
   restoreFromDisk(): void {
     const persisted = loadSessions();
@@ -44,6 +58,7 @@ export class SessionManager {
       try {
         const session = ManagedSession.restore(data, this.broadcast);
         if (this.triggerCreator) session.onScheduleTrigger = this.triggerCreator;
+        if (this.authorDescriber) session.describeAuthor = this.authorDescriber;
         this.sessions.set(session.id, session);
         console.log(`  - Restored: ${data.config.name} (${data.id})`);
         // Schedule summary if session has been idle long enough and has no summary
@@ -102,6 +117,7 @@ export class SessionManager {
 
     const session = new ManagedSession(sanitizedConfig, this.broadcast);
     if (this.triggerCreator) session.onScheduleTrigger = this.triggerCreator;
+    if (this.authorDescriber) session.describeAuthor = this.authorDescriber;
     this.sessions.set(session.id, session);
 
     const state = session.getState();
@@ -111,7 +127,7 @@ export class SessionManager {
     return state;
   }
 
-  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: string }): Promise<void> {
+  async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: string; author?: MessageAuthor }): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
@@ -119,7 +135,7 @@ export class SessionManager {
 
     // If paused, queue instead of sending
     if (this.pauseUntil && new Date(this.pauseUntil).getTime() > Date.now()) {
-      session.queueMessage(message, images, { internal: opts?.internal, files: opts?.files });
+      session.queueMessage(message, images, { internal: opts?.internal, files: opts?.files, model: opts?.model, effort: opts?.effort, author: opts?.author });
       return;
     }
 
@@ -233,6 +249,9 @@ export class SessionManager {
     if (summaryTimer) { clearTimeout(summaryTimer); this.summaryTimers.delete(sessionId); }
     this.broadcast({ type: 'session_destroyed', sessionId });
     this.persist();
+    for (const fn of this.destroyListeners) {
+      try { fn(sessionId); } catch (err) { console.error('[SessionManager] destroy listener failed:', err); }
+    }
   }
 
   /** Archive a project: AI wrap-up → zip → verify → move the project dir to Trash → destroy
@@ -501,7 +520,9 @@ export class SessionManager {
           sessionId: session.id,
           queue: [...session.queuedMessages],
         });
-        session.sendMessage(next.text, next.images).then(() => {
+        // Carry every option the message was queued with. Above all `author`: without it a guest's
+        // message would reach Claude as the owner's.
+        session.sendMessage(next.text, next.images, { internal: next.internal, files: next.files, model: next.model, effort: next.effort as EffortLevel | undefined, author: next.author }).then(() => {
           this.persist();
         }).catch(err => {
           console.error(`Error draining queue for session ${session.id}:`, err);

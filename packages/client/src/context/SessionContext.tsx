@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, UiState } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, UiState, ShareLink, MessageAuthor } from '@clauder/shared';
 import { trimMessages } from '@clauder/shared';
 import { WsClient } from '../lib/ws-client';
-import { buildWsCandidates } from '../lib/hosts';
+import { buildWsCandidates, buildGuestWsUrl } from '../lib/hosts';
 import { notify } from '../lib/notifications';
 import { isSessionUnread } from '../lib/unread';
 import { loadLocalUiState, saveLocalUiState, localUiStateToMerge, clearLocalUiState } from '../lib/uiStateLocal';
@@ -57,6 +57,13 @@ interface AppState {
    *  list doesn't carry them, the tab fetches them (request_debug_log), and live entries for other
    *  sessions are dropped without a re-render. */
   debugSessionId: string | null;
+  /** Share links (owner side, from shares_snapshot) and this Mac's address on the local network. */
+  shares: ShareLink[];
+  shareBaseUrl: string | null;
+  /** Set on a share-link page: the one session this guest can see, and their name. */
+  guest: { sessionId: string; guestName: string } | null;
+  /** The share link was refused (revoked or invalid); the page has stopped reconnecting. */
+  accessDenied: boolean;
 }
 
 // Actions
@@ -68,7 +75,10 @@ type Action =
   | { type: 'STATE_CHANGE'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
   | { type: 'ASSISTANT_MESSAGE'; sessionId: string; messageId: string; text: string; thinking?: string; toolUses?: any[]; images?: ImageAttachment[] }
   | { type: 'ASSISTANT_STREAM_DELTA'; sessionId: string; messageId: string; delta: string }
-  | { type: 'USER_MESSAGE_ECHO'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
+  | { type: 'USER_MESSAGE_ECHO'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[]; author?: MessageAuthor }
+  | { type: 'SHARES_SNAPSHOT'; shares: ShareLink[]; baseUrl: string }
+  | { type: 'GUEST_INFO'; sessionId: string; guestName: string }
+  | { type: 'ACCESS_DENIED' }
   | { type: 'TOOL_ACTIVITY'; sessionId: string; activity: { toolName: string; description: string } }
   | { type: 'RESULT'; sessionId: string; costUsd: number; success: boolean; error?: string }
   | { type: 'CONTEXT_UPDATE'; sessionId: string; contextUsage: { inputTokens: number; outputTokens: number; contextWindow: number } }
@@ -214,6 +224,7 @@ function reducer(state: AppState, action: Action): AppState {
             content: action.text,
             images: action.images,
             files: action.files,
+            author: action.author,
             timestamp: new Date().toISOString(),
           }),
         })),
@@ -601,6 +612,15 @@ function reducer(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'SHARES_SNAPSHOT':
+      return { ...state, shares: action.shares, shareBaseUrl: action.baseUrl };
+
+    case 'GUEST_INFO':
+      return { ...state, guest: { sessionId: action.sessionId, guestName: action.guestName } };
+
+    case 'ACCESS_DENIED':
+      return { ...state, accessDenied: true };
+
     case 'WATCH_DEBUG_LOG': {
       if (action.sessionId === state.debugSessionId) return state;
       // Free the log of the tab being left; the new one arrives as SESSION_DEBUG_LOG.
@@ -801,6 +821,10 @@ interface SessionContextValue {
   /** Open (sessionId) or close (null) a session's Debug tab: fetches its log and keeps it live
    *  while open; closing frees it. */
   watchDebugLog: (sessionId: string | null) => void;
+  /** Share links: one session with one named guest on the local network, until revoked. */
+  createShare: (sessionId: string, guestName: string, rules: string) => void;
+  updateShare: (id: string, patch: { guestName?: string; rules?: string }) => void;
+  revokeShare: (id: string) => void;
   logEvent: (feature: string, detail?: Record<string, string | number | boolean>) => void;
   // --- Global search (Cmd/Ctrl+K) — UI-only state, not part of the reducer/server snapshot ---
   showSearch: boolean;
@@ -831,7 +855,8 @@ const SessionActionsContext = createContext<SessionActions | null>(null);
  *  changes when tags are edited. */
 const SessionTagsContext = createContext<TagDef[]>([]);
 
-export function SessionProvider({ children }: { children: React.ReactNode }) {
+/** `shareToken` makes this a share-link page: one connection, scoped by the server to one session. */
+export function SessionProvider({ children, shareToken }: { children: React.ReactNode; shareToken?: string }) {
   const [state, dispatch] = useReducer(reducer, {
     sessions: new Map(),
     activeSessionId: null,
@@ -852,6 +877,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     projectRuns: new Map(),
     archiveStatus: new Map(),
     debugSessionId: null,
+    shares: [],
+    shareBaseUrl: null,
+    guest: null,
+    accessDenied: false,
   // This browser's own copy until the server syncs — see lib/uiStateLocal.ts.
   }, (init) => ({ ...init, uiState: loadLocalUiState() }));
 
@@ -902,7 +931,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         break;
       }
       case 'user_message_echo':
-        dispatch({ type: 'USER_MESSAGE_ECHO', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, images: msg.images, files: msg.files });
+        dispatch({ type: 'USER_MESSAGE_ECHO', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, images: msg.images, files: msg.files, author: msg.author });
         break;
       case 'assistant_message':
         dispatch({ type: 'ASSISTANT_MESSAGE', sessionId: msg.sessionId, messageId: msg.messageId, text: msg.text, thinking: msg.thinking, toolUses: msg.toolUses, images: msg.images });
@@ -951,6 +980,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         break;
       case 'session_history':
         dispatch({ type: 'SESSION_HISTORY', sessionId: msg.sessionId, messages: msg.messages });
+        break;
+      case 'shares_snapshot':
+        dispatch({ type: 'SHARES_SNAPSHOT', shares: msg.shares, baseUrl: msg.baseUrl });
+        break;
+      case 'guest_info':
+        dispatch({ type: 'GUEST_INFO', sessionId: msg.sessionId, guestName: msg.guestName });
         break;
       case 'session_debug_log':
         dispatch({ type: 'SESSION_DEBUG_LOG', sessionId: msg.sessionId, entries: msg.entries });
@@ -1095,7 +1130,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const client = new WsClient(
-      buildWsCandidates(),
+      shareToken ? [buildGuestWsUrl(shareToken)] : buildWsCandidates(),
       handleWsMessage,
       (connected) => {
         dispatch({ type: 'WS_CONNECTED', connected });
@@ -1103,11 +1138,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         const debugSessionId = stateRef.current.debugSessionId;
         if (connected && debugSessionId) client.send({ type: 'request_debug_log', sessionId: debugSessionId });
       },
+      // A share link that's revoked or invalid is closed with 4403: stop retrying and say so.
+      (code) => {
+        if (!shareToken || code !== 4403) return false;
+        dispatch({ type: 'ACCESS_DENIED' });
+        return true;
+      },
     );
     client.connect();
     wsRef.current = client;
     return () => client.destroy();
-  }, [handleWsMessage]);
+  }, [handleWsMessage, shareToken]);
 
   const createSession = useCallback((config: SessionConfig, opts?: { projectFolder?: string }) => {
     wsRef.current?.send({ type: 'create_session', config, projectFolder: opts?.projectFolder });
@@ -1362,6 +1403,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     wsRef.current?.send({ type: 'apply_claude_md_candidate', sessionId, candidate });
   }, []);
 
+  const createShareFn = useCallback((sessionId: string, guestName: string, rules: string) => {
+    wsRef.current?.send({ type: 'create_share', sessionId, guestName, rules });
+  }, []);
+  const updateShareFn = useCallback((id: string, patch: { guestName?: string; rules?: string }) => {
+    wsRef.current?.send({ type: 'update_share', id, ...patch });
+  }, []);
+  const revokeShareFn = useCallback((id: string) => {
+    wsRef.current?.send({ type: 'revoke_share', id });
+  }, []);
+
   const watchDebugLogFn = useCallback((sessionId: string | null) => {
     dispatch({ type: 'WATCH_DEBUG_LOG', sessionId });
     if (sessionId) wsRef.current?.send({ type: 'request_debug_log', sessionId });
@@ -1432,6 +1483,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     requestScrollTo,
     appendToDraft,
     watchDebugLog: watchDebugLogFn,
+    createShare: createShareFn,
+    updateShare: updateShareFn,
+    revokeShare: revokeShareFn,
   };
   // The same object for as long as every action keeps its identity, which they all do.
   const actions = useMemo(() => actionList, Object.values(actionList)); // eslint-disable-line react-hooks/exhaustive-deps

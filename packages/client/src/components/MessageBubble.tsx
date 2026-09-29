@@ -6,6 +6,7 @@ import { RichMarkdown } from './RichMarkdown';
 import { ZoomableImage } from './ZoomableImage';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useSessions, useSessionActions } from '../context/SessionContext';
+import { useGuestMode } from '../lib/guestMode';
 
 /** Open base64 content in a new tab via a blob URL. Browsers block top-level navigation to
  *  data: URLs (yields a blank tab), so we must materialize a blob URL instead. */
@@ -106,6 +107,7 @@ function ProgressNote({ text }: { text: string }) {
 export const MessageBubble = memo(function MessageBubble({ message, sessionId }: { message: UIMessage; sessionId: string }) {
   const { pinMessage } = useSessionActions();
   const [lightbox, setLightbox] = useState<string | null>(null);
+  const guestMode = useGuestMode();
 
   if (message.role === 'system') {
     return (
@@ -116,6 +118,9 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
   }
 
   const isUser = message.role === 'user';
+  // On a shared session, say who wrote each user message: a guest by name (and in teal); on the
+  // guest's own page, anything unattributed came from the owner.
+  const authorLabel = isUser ? (message.author?.name ?? (guestMode ? 'Owner' : null)) : null;
   const candidates = !isUser && message.content ? extractCandidates(message.content) : [];
   const pinned = !!message.pinned;
   const hasText = !!message.content?.trim();
@@ -142,12 +147,13 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
       <div
         className={`max-w-[85%] min-w-0 rounded-lg ${toolOnly ? 'px-2 py-1.5' : 'px-3 py-2'} text-sm break-words overflow-hidden ${
           isUser
-            ? 'bg-blue-600 text-white'
+            ? message.author ? 'bg-teal-700 text-white' : 'bg-blue-600 text-white'
             : pinned
               ? 'bg-gray-800 text-gray-100 border border-amber-600/60'
               : 'bg-gray-800 text-gray-100 border border-gray-700'
         }`}
       >
+        {authorLabel && <div className="text-[10px] font-semibold text-white/70 mb-0.5">{authorLabel}</div>}
         {hasThinking && (
           <div className="mb-1.5">
             <ProgressNote text={message.thinking!} />
@@ -234,7 +240,7 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
         {message.isStreaming && (
           <span className="inline-block w-1.5 h-4 bg-gray-400 animate-pulse ml-0.5 align-text-bottom" />
         )}
-        {candidates.length > 0 && (
+        {candidates.length > 0 && !guestMode && (
           <ClaudeMdCandidates candidates={candidates} sessionId={sessionId} />
         )}
       </div>
@@ -243,7 +249,7 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
           {message.timestamp && (
             <span>{new Date(message.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
           )}
-          {!isUser && (
+          {!isUser && !guestMode && (
             <button
               onClick={() => pinMessage(sessionId, message.id, !pinned)}
               className={`transition-opacity ${pinned ? 'opacity-100 text-amber-400' : 'opacity-40 group-hover:opacity-70 hover:!opacity-100 text-gray-500'}`}

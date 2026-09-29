@@ -1,4 +1,4 @@
-import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, UIMessage, UiState } from './session.js';
+import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, UIMessage, UiState, ShareLink, MessageAuthor } from './session.js';
 import type { ProjectRun, RunBudget } from './project-run.js';
 
 // Browser -> Server
@@ -65,6 +65,11 @@ export type WsInboundMessage =
   | { type: 'update_tag'; id: string; label?: string; color?: string }
   | { type: 'delete_tag'; id: string }
   | { type: 'pin_message'; sessionId: string; messageId: string; pinned: boolean }
+  /** Share links (owner only; a guest connection may send only ping, request_history,
+   *  send_message and interrupt_session, for its own session). */
+  | { type: 'create_share'; sessionId: string; guestName: string; rules: string }
+  | { type: 'update_share'; id: string; guestName?: string; rules?: string }
+  | { type: 'revoke_share'; id: string }
   | { type: 'stop_model_plan'; sessionId: string }
   | { type: 'stop_monitor'; sessionId: string; monitorId: string }
   | { type: 'archive_session'; sessionId: string }
@@ -82,7 +87,7 @@ export type WsOutboundMessage =
   | { type: 'state_change'; sessionId: string; status: string; error?: string; waitingFor?: string | null }
   | { type: 'assistant_message'; sessionId: string; messageId: string; text: string; thinking?: string; toolUses?: { id: string; name: string; input: Record<string, unknown> }[]; images?: ImageAttachment[] }
   | { type: 'assistant_message_stream'; sessionId: string; messageId: string; delta: string }
-  | { type: 'user_message_echo'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
+  | { type: 'user_message_echo'; sessionId: string; messageId: string; text: string; images?: ImageAttachment[]; files?: FileAttachment[]; author?: MessageAuthor }
   | { type: 'tool_activity'; sessionId: string; activity: ToolActivity }
   | { type: 'result'; sessionId: string; costUsd: number; success: boolean; error?: string }
   | { type: 'context_update'; sessionId: string; contextUsage: ContextUsage }
@@ -125,6 +130,10 @@ export type WsOutboundMessage =
   /** Full snapshot of the tag registry (sent on connect and after any tag CRUD). */
   | { type: 'tags_registry'; tags: TagDef[] }
   | { type: 'ui_state'; state: UiState }
+  /** Every share link, to owner connections only. `baseUrl` is this Mac on the local network. */
+  | { type: 'shares_snapshot'; shares: ShareLink[]; baseUrl: string }
+  /** Sent to a guest connection once, on connect: which session it's scoped to and who it is. */
+  | { type: 'guest_info'; sessionId: string; guestName: string }
   /** Reply to `request_history`: the session's full history, attachments as URLs. */
   | { type: 'session_history'; sessionId: string; messages: UIMessage[] }
   /** Reply to `request_debug_log`: the session's recent debug entries. */

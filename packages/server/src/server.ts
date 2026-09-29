@@ -14,6 +14,8 @@ import { logUsage } from './usage-log.js';
 import { DEV_ROOT, devRootForDisplay, listProjectFolders } from './projects.js';
 import { search, smartSearch } from './search.js';
 import { getGitStatus } from './git-status.js';
+import { resolveAccess, setAuthCookie, getAuthToken, isOwnerKey } from './auth.js';
+import { shareBaseUrl, type ShareManager } from './shares.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -77,11 +79,45 @@ export function createApp(
   getTriggers: () => TriggerManager,
   getProjectRunner: () => ProjectRunner,
   getBroadcast: () => (msg: WsOutboundMessage) => void = () => () => {},
+  getShares: () => ShareManager | undefined = () => undefined,
 ) {
   const app = express();
   // The client bundle shipped uncompressed (559 KB) — a real cost on cellular.
   app.use(compression());
   app.use(express.json({ limit: '5mb' }));
+
+  // Who may use the API (auth.ts resolveAccess): the owner for everything, a share-link guest only
+  // for its own session's attachments, and anyone for the health and sign-in checks.
+  app.use('/api', (req, res, next) => {
+    if (req.path === '/health' || req.path === '/auth-check') return next();
+    const share = typeof req.query.share === 'string' ? req.query.share : null;
+    const access = resolveAccess(req, share, (token) => getShares()?.findByToken(token) ?? null);
+    if (access.role === 'owner') return next();
+    if (access.role === 'guest' && req.method === 'GET' && req.path.startsWith(`/attachments/${encodeURIComponent(access.share.sessionId)}/`)) return next();
+    res.status(access.role === 'guest' ? 403 : 401).json({ error: access.role === 'guest' ? 'Not available on a shared link' : 'Not signed in' });
+  });
+
+  // Whether this device has owner access (the page shows a sign-in screen if not). A device that
+  // opened the owner link gets its cookie renewed here, so it stays signed in past the 400-day cap.
+  app.get('/api/auth-check', (req, res) => {
+    const access = resolveAccess(req, null, () => null);
+    if (access.role === 'owner' && access.via === 'owner-link') setAuthCookie(res, req.protocol === 'https');
+    res.json({ owner: access.role === 'owner', via: access.role === 'owner' ? access.via : null });
+  });
+
+  // The owner link: opening it once on a device gives that device owner access on the local
+  // network, by setting the auth cookie. The Share dialog offers it; it must stay private.
+  app.get('/api/owner-link', (_req, res) => {
+    res.json({ url: `${shareBaseUrl()}/owner/${getAuthToken()}` });
+  });
+  app.get('/owner/:key', (req, res) => {
+    if (!isOwnerKey(req.params.key)) {
+      res.status(403).type('text').send('That owner link is not valid.');
+      return;
+    }
+    setAuthCookie(res, req.protocol === 'https');
+    res.redirect('/');
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

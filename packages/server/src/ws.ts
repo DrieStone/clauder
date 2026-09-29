@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
-import type { WsInboundMessage, WsOutboundMessage } from '@clauder/shared';
+import type { WsInboundMessage, WsOutboundMessage, ShareLink } from '@clauder/shared';
 import { SessionManager } from './session-manager.js';
 import { discoverSessions } from './discovery.js';
 import { getRateLimitInfo, resetRateLimit } from './rate-limits.js';
@@ -12,6 +12,10 @@ import type { TagManager } from './tags.js';
 import type { UiStateManager } from './ui-state.js';
 import { logUsage } from './usage-log.js';
 import { ensureProjectFolder } from './projects.js';
+import { resolveAccess, type Access } from './auth.js';
+import { normalizeIp } from './network.js';
+import { shareBaseUrl, type ShareManager } from './shares.js';
+import { forGuest, toGuestState, guestMessages } from './guest-view.js';
 
 /** Pull a few known-safe scalar fields off an inbound WS message for the usage log. Never
  *  includes free-text fields that may carry conversation/note/goal content (message, notes,
@@ -30,7 +34,7 @@ function safeDetail(msg: any): Record<string, unknown> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
-export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager) {
+export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager, getShares: () => ShareManager) {
   // permessage-deflate cuts the initial sessions_list payload from ~3MB to ~500KB.
   // Without it, the client can't finish processing before the server sends its next
   // message, and browsers disconnect+reconnect in a tight loop.
@@ -41,27 +45,48 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       threshold: 8 * 1024,
     },
   });
-  const clients = new Set<WebSocket>();
+  /** Every open connection and who it is: the owner (everything) or a guest (one session). */
+  const clients = new Map<WebSocket, Access>();
 
-  // Handle HTTP upgrade for WebSocket connections
+  // Handle HTTP upgrade for WebSocket connections. Each is classified first (auth.ts): the owner,
+  // a share-link guest, or nobody. A refusal still completes the upgrade, then closes with a code
+  // the page can read (4401 not signed in, 4403 invalid or revoked link): a refused HTTP upgrade
+  // just looks like a network error, and the page would retry forever.
   server.on('upgrade', (req, socket, head) => {
-    if (req.url !== '/ws') {
+    const url = new URL(req.url ?? '/', 'http://clauder');
+    if (url.pathname !== '/ws') {
       socket.destroy();
       return;
     }
-
+    const access = resolveAccess(req, url.searchParams.get('share'), (token) => getShares().findByToken(token));
     wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req);
+      if (access.role === 'none') {
+        console.log(`[WS] Refused (${access.reason}) — ${normalizeIp(req.socket.remoteAddress)}`);
+        ws.close(access.reason === 'not-signed-in' ? 4401 : 4403, access.reason);
+        return;
+      }
+      wss.emit('connection', ws, req, access);
     });
   });
 
-  // Broadcast function that sends to all connected clients
+  // Broadcast: the owner gets everything; a guest only its own session's events (guest-view.ts).
   function broadcast(msg: WsOutboundMessage) {
     const data = JSON.stringify(msg);
-    for (const client of clients) {
-      if (client.readyState === WebSocket.OPEN) {
+    for (const [client, access] of clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      if (access.role === 'owner') {
         client.send(data);
+      } else if (access.role === 'guest') {
+        const out = forGuest(msg, access.share);
+        if (out) client.send(JSON.stringify(out));
       }
+    }
+  }
+
+  /** Drop every connection using a share link, the moment it's revoked. */
+  function disconnectShare(shareId: string) {
+    for (const [client, access] of clients) {
+      if (access.role === 'guest' && access.share.id === shareId) client.close(4403, 'revoked');
     }
   }
 
@@ -71,7 +96,7 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
 
   // Ping all clients every 30s to keep connections alive
   const pingInterval = setInterval(() => {
-    for (const client of clients) {
+    for (const client of clients.keys()) {
       if (client.readyState === WebSocket.OPEN) {
         client.ping();
       }
@@ -82,15 +107,7 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
     clearInterval(pingInterval);
   });
 
-  wss.on('connection', (ws, req: import('http').IncomingMessage) => {
-    clients.add(ws);
-    // Identify the client so a phone reconnect-loop is distinguishable from the desktop:
-    // remote IP + a short user-agent tag on both connect and disconnect lines.
-    const ip = String(req?.socket?.remoteAddress ?? '?').replace(/^::ffff:/, '');
-    const ua = String(req?.headers?.['user-agent'] ?? '');
-    const uaTag = /iPhone|iPad|Android|Mobile/i.test(ua) ? 'mobile' : /Macintosh|Windows|X11/i.test(ua) ? 'desktop' : 'other';
-    console.log(`[WS] Client connected (${clients.size} total) — ${ip} ${uaTag}`);
-
+  function sendOwnerSnapshot(ws: WebSocket) {
     // Send current sessions list on connect
     const sessionsMsg: WsOutboundMessage = {
       type: 'sessions_list',
@@ -135,20 +152,58 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       // UiStateManager may not be initialized yet — skip
     }
 
+    // Share links (tokens included): owner connections only.
+    try {
+      ws.send(JSON.stringify({ type: 'shares_snapshot', shares: getShares().list(), baseUrl: shareBaseUrl() }));
+    } catch {
+      // ShareManager may not be initialized yet — skip
+    }
+
     // Skills are NOT sent for every session here any more: that was one message and one disk
     // scan per session on every connect. SessionView asks for the session you open instead.
+  }
+
+  /** A guest's whole world: its one session, stripped of the owner's private state, and its name. */
+  function sendGuestSnapshot(ws: WebSocket, share: ShareLink) {
+    const session = sessionManager.getSession(share.sessionId);
+    const sessions = session ? [toGuestState(toClientState(session.getState()), share)] : [];
+    ws.send(JSON.stringify({ type: 'sessions_list', sessions }));
+    ws.send(JSON.stringify({ type: 'guest_info', sessionId: share.sessionId, guestName: share.guestName }));
+  }
+
+  wss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage, access: Access) => {
+    clients.set(ws, access);
+    // Identify the client so a phone reconnect-loop is distinguishable from the desktop:
+    // remote IP + a short user-agent tag on both connect and disconnect lines.
+    const ip = normalizeIp(req?.socket?.remoteAddress) || '?';
+    const ua = String(req?.headers?.['user-agent'] ?? '');
+    const uaTag = /iPhone|iPad|Android|Mobile/i.test(ua) ? 'mobile' : /Macintosh|Windows|X11/i.test(ua) ? 'desktop' : 'other';
+    const who = access.role === 'guest' ? `guest "${access.share.guestName}"` : access.role === 'owner' ? `owner via ${access.via}` : '';
+    console.log(`[WS] Client connected (${clients.size} total) — ${ip} ${uaTag} ${who}`);
+
+    if (access.role === 'guest') {
+      sendGuestSnapshot(ws, access.share);
+      getShares().touch(access.share.id);
+    } else {
+      sendOwnerSnapshot(ws);
+    }
 
     ws.on('message', async (data) => {
       try {
         const msg: WsInboundMessage = JSON.parse(data.toString());
         const reply = (out: WsOutboundMessage) => { try { ws.send(JSON.stringify(out)); } catch { /* client went away */ } };
-        await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, reply);
+        if (access.role === 'guest') {
+          await handleGuestMessage(msg, access.share.id, sessionManager, getShares(), reply, () => ws.close(4403, 'revoked'));
+        } else {
+          await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, getShares, reply);
+        }
       } catch (err: any) {
         console.error('[WS] Error handling message:', err);
         ws.send(JSON.stringify({
           type: 'error',
           sessionId: '',
-          message: err.message || 'Unknown error',
+          // A guest gets no internals.
+          message: access.role === 'guest' ? 'Something went wrong' : err.message || 'Unknown error',
         }));
       }
     });
@@ -160,7 +215,55 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
   });
 
   // getClientCount feeds the hourly health snapshot in index.ts.
-  return { wss, broadcast, getClientCount: () => clients.size };
+  return { wss, broadcast, disconnectShare, getClientCount: () => clients.size };
+}
+
+/** A guest may watch its session, load its history, send messages and stop a turn: nothing else,
+ *  and only for its own session. Anything else is ignored without an answer. The link is looked up
+ *  fresh each time, so a renamed guest or new rules apply at once and a revoked link stops working
+ *  even on an open connection. */
+async function handleGuestMessage(
+  msg: WsInboundMessage,
+  shareId: string,
+  sessionManager: SessionManager,
+  shares: ShareManager,
+  reply: (msg: WsOutboundMessage) => void,
+  disconnect: () => void,
+) {
+  if (msg.type === 'ping') return;
+  const share = shares.get(shareId);
+  if (!share) {
+    disconnect();
+    return;
+  }
+  const sessionId = share.sessionId;
+  switch (msg.type) {
+    case 'request_history': {
+      const session = sessionManager.getSession(sessionId);
+      if (session && msg.sessionId === sessionId) {
+        reply({ type: 'session_history', sessionId, messages: guestMessages(toClientHistory(session.getState()), share) });
+      }
+      return;
+    }
+    case 'send_message': {
+      if (msg.sessionId !== sessionId) return;
+      const text = String(msg.message ?? '').trim().slice(0, 20_000);
+      if (!text) return;
+      logUsage('guest_send_message', { sessionId });
+      shares.touch(share.id);
+      // Text only, on the session's own model: no attachments, plan mode, or per-turn overrides.
+      await sessionManager.sendMessage(sessionId, text, undefined, { author: { name: share.guestName, shareId: share.id } });
+      return;
+    }
+    case 'interrupt_session': {
+      if (msg.sessionId !== sessionId) return;
+      logUsage('guest_interrupt', { sessionId });
+      await sessionManager.interruptSession(sessionId);
+      return;
+    }
+    default:
+      return;
+  }
 }
 
 async function handleMessage(
@@ -172,6 +275,7 @@ async function handleMessage(
   getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner,
   getTags: () => TagManager,
   getUiState: () => UiStateManager,
+  getShares: () => ShareManager,
   /** Send to the requesting client only (not a broadcast). */
   reply: (msg: WsOutboundMessage) => void,
 ) {
@@ -686,6 +790,19 @@ async function handleMessage(
 
     case 'log_event':
       // Already logged above — no other action needed
+      break;
+
+    // Share links. The manager broadcasts the updated list to owner connections.
+    case 'create_share': {
+      if (!sessionManager.getSession(msg.sessionId)) throw new Error('Session not found');
+      getShares().create({ sessionId: msg.sessionId, guestName: String(msg.guestName ?? ''), rules: String(msg.rules ?? '') });
+      break;
+    }
+    case 'update_share':
+      getShares().update(msg.id, { guestName: msg.guestName, rules: msg.rules });
+      break;
+    case 'revoke_share':
+      getShares().revoke(msg.id);
       break;
 
     case 'ping':

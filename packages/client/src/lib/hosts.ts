@@ -8,6 +8,19 @@
 // Tailscale MagicDNS name or LAN hostname ever changes.
 const ALTERNATE_HOSTNAMES = ['JS.local', 'macbook-pro.tail0923a6.ts.net'];
 
+/** The Tailscale address of this Clauder, for the sign-in screen: a Tailscale device is always
+ *  the owner's. */
+export function tailscaleOrigin(): string | null {
+  const host = ALTERNATE_HOSTNAMES.find(h => h.endsWith('.ts.net'));
+  return host ? `http://${host}:${window.location.port || '3001'}` : null;
+}
+
+/** A share-link page connects only to the host that served it, carrying the link's token. */
+export function buildGuestWsUrl(token: string): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws?share=${encodeURIComponent(token)}`;
+}
+
 /** Build the ordered list of ws:// URLs to try, current-origin first (it just served the page,
  *  so it's known-good right now), then the alternates, deduplicated. */
 export function buildWsCandidates(): string[] {

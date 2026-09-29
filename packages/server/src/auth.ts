@@ -3,6 +3,8 @@ import path from 'path';
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import type { IncomingMessage } from 'http';
+import type { ShareLink } from '@clauder/shared';
+import { normalizeIp, isThisMachine, isTailscale, isLan } from './network.js';
 
 const CLAUDER_DIR = path.join(process.env.HOME || '~', '.clauder');
 const TOKEN_FILE = path.join(CLAUDER_DIR, 'auth-token');
@@ -64,15 +66,24 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   res.status(401).json({ error: 'Unauthorized' });
 }
 
+/** Whether `key` is the owner token (the secret in the owner link), compared in constant time. */
+export function isOwnerKey(key: string): boolean {
+  if (!authToken || typeof key !== 'string') return false;
+  const a = Buffer.from(key);
+  const b = Buffer.from(authToken);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 /** Check if an incoming HTTP request (e.g. WebSocket upgrade) has a valid auth cookie. */
 export function isAuthenticated(req: IncomingMessage): boolean {
   const token = parseCookie(req.headers.cookie, COOKIE_NAME);
   return token === authToken;
 }
 
-/** Set the auth cookie on a response. */
+/** Set the auth cookie on a response. Browsers cap cookie lifetimes at 400 days; the auth check
+ *  re-sets it on each visit, so a signed-in device stays signed in. */
 export function setAuthCookie(res: Response, secure: boolean) {
-  const maxAge = 30 * 24 * 60 * 60; // 30 days
+  const maxAge = 400 * 24 * 60 * 60;
   const parts = [
     `${COOKIE_NAME}=${encodeURIComponent(authToken)}`,
     `Path=/`,
@@ -84,4 +95,31 @@ export function setAuthCookie(res: Response, secure: boolean) {
     parts.push('Secure');
   }
   res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+export type Access =
+  | { role: 'owner'; via: 'this-mac' | 'tailscale' | 'owner-link' }
+  | { role: 'guest'; share: ShareLink }
+  | { role: 'none'; reason: 'not-signed-in' | 'invalid-share' | 'share-off-network' };
+
+/** Who's connecting, for every API request and WebSocket.
+ *  - The owner: this Mac, their Tailscale devices, or a device that opened the owner link once
+ *    (which sets the auth cookie). Plain Wi-Fi isn't enough: a guest is on that network too.
+ *  - A guest: a share link's token, honored only from the local network, Tailscale, or this Mac,
+ *    never the internet. A request carrying a share token is always that guest, even from the
+ *    owner's own devices, so opening a link previews exactly what the guest sees.
+ *  Tailscale needs both ends on Tailscale addresses, not just a 100.x source address. */
+export function resolveAccess(req: IncomingMessage, shareToken: string | null, findShare: (token: string) => ShareLink | null): Access {
+  const remote = normalizeIp(req.socket?.remoteAddress);
+  const local = normalizeIp(req.socket?.localAddress);
+  if (shareToken) {
+    const share = findShare(shareToken);
+    if (!share) return { role: 'none', reason: 'invalid-share' };
+    if (!isThisMachine(remote) && !isLan(remote) && !isTailscale(remote)) return { role: 'none', reason: 'share-off-network' };
+    return { role: 'guest', share };
+  }
+  if (isThisMachine(remote)) return { role: 'owner', via: 'this-mac' };
+  if (isTailscale(remote) && isTailscale(local)) return { role: 'owner', via: 'tailscale' };
+  if (authToken && parseCookie(req.headers.cookie, COOKIE_NAME) === authToken) return { role: 'owner', via: 'owner-link' };
+  return { role: 'none', reason: 'not-signed-in' };
 }

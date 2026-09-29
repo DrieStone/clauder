@@ -12,6 +12,8 @@ import { onRateLimitUpdate } from './rate-limits.js';
 import { TriggerManager } from './triggers.js';
 import { TagManager } from './tags.js';
 import { UiStateManager } from './ui-state.js';
+import { initAuth } from './auth.js';
+import { ShareManager, shareBaseUrl, guestNote, revokedGuestNote } from './shares.js';
 import { ProjectRunner } from './project-runner.js';
 import { GoalSupervisor } from './goal-supervisor.js';
 import { ModelPlanRunner } from './model-plan-runner.js';
@@ -36,6 +38,9 @@ const SCRATCH_MODEL = 'claude-sonnet-5-5';
   }
 }
 
+// The owner token behind the owner link and its cookie (auth.ts). Loaded before anything serves.
+initAuth();
+
 // Create session manager with a placeholder broadcast (wired up in setupWebSocket)
 const sessionManager = new SessionManager(() => {});
 
@@ -45,6 +50,8 @@ let triggerManager: TriggerManager;
 let tagManager: TagManager;
 // Cross-device view state — read status, closed tabs, pinned-tab order. Wired up post-WS.
 let uiStateManager: UiStateManager;
+// Share links — one session per named guest on the local network. Wired up post-WS.
+let shareManager: ShareManager;
 // Project Runner — drives overnight autonomous runs. Wired up post-WS.
 let projectRunner: ProjectRunner;
 // Model Plan Runner — drives multi-step plans. Constructed post-WS (needs `broadcast`);
@@ -55,11 +62,11 @@ let modelPlanRunner: ModelPlanRunner;
 let broadcastFn: (msg: WsOutboundMessage) => void = () => {};
 
 // Create Express app and HTTP server
-const app = createApp(sessionManager, () => triggerManager, () => projectRunner, () => broadcastFn);
+const app = createApp(sessionManager, () => triggerManager, () => projectRunner, () => broadcastFn, () => shareManager);
 const server = http.createServer(app);
 
 // Set up WebSocket on the same server
-const { broadcast, getClientCount } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager);
+const { broadcast, getClientCount, disconnectShare } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager, () => shareManager);
 broadcastFn = broadcast;
 
 // Tag registry — broadcast the full snapshot to all clients after any CRUD.
@@ -69,6 +76,20 @@ tagManager.load();
 // Read status and tab state, synced across devices — full snapshot to all clients on any change.
 uiStateManager = new UiStateManager((state) => broadcast({ type: 'ui_state', state }), (id) => !!sessionManager.getSession(id));
 uiStateManager.load();
+
+// Share links. Owners get the full list after any change (a guest's connection filters it out); a
+// revoked link's open connections are dropped at once. Each guest message reaches Claude behind a
+// note naming the guest and the owner's rules for them, and a destroyed session takes its links.
+shareManager = new ShareManager(
+  (shares) => broadcast({ type: 'shares_snapshot', shares, baseUrl: shareBaseUrl() }),
+  (share) => disconnectShare(share.id),
+);
+shareManager.load();
+sessionManager.setAuthorDescriber((author) => {
+  const share = shareManager.get(author.shareId);
+  return share ? guestNote(share) : revokedGuestNote(author.name);
+});
+sessionManager.onSessionDestroyed((id) => shareManager.revokeForSession(id));
 
 // Hourly health snapshot — one line so slow leaks and stuck sessions are visible in the log
 // (the server runs for weeks; without this, a session wedged in "working" for two days or
