@@ -19,6 +19,9 @@ import { recordTurnCost } from './cost-ledger.js';
 import { classifyTaskSwitch } from './task-classifier.js';
 import { getSkillsForCwd } from './skills.js';
 import { extractClaudeMdCandidates, applyClaudeMdCandidate } from './claude-md.js';
+import { taskSystemPrompt } from './project.js';
+import { capApiModel, type ApiCredits, type ApiTurnPlan, type ApiTurnRequest } from './api-credits.js';
+import { BackgroundTracker, strandedLine, strandedPrompt } from './background-tasks.js';
 
 // Walk up the directory tree from this file to find the Claude CLI binary.
 // v2.1.120+ ships a native binary at bin/claude.exe instead of cli.js.
@@ -98,6 +101,14 @@ const MAX_SHOW_IMAGE_BYTES = 5_000_000;
  *  re-authenticate banner instead of a dead-end generic error. Kept broad on purpose — the CLI
  *  has used several wordings ("OAuth token has expired", "OAuth session expired and could not be
  *  refreshed", "authentication_error", bare 401). If a new variant slips through, widen this. */
+/** A turn on API credits that failed because the account has no credit left, or billing failed. */
+const API_CREDITS_EXHAUSTED_RE = /credit balance is too low|insufficient (?:credit|funds|balance)|purchase (?:more )?credits|billing (?:error|issue|problem)|plans? (?:&|and) billing/i;
+/** ...or because Anthropic refused the API key itself. */
+const API_KEY_REJECTED_RE = /invalid[ _-]?(?:x-)?api[ _-]?key|api key.{0,40}(?:invalid|revoked|disabled|not valid)|authentication_error|\b401\b/i;
+/** How long a session waits after the API itself rate limited a turn on API credits. */
+const API_RATE_LIMIT_RETRY_MS = 3 * 60 * 1000;
+/** Times in a row Claude is told its background work died, before it waits for a person. */
+const MAX_BG_RECOVERIES = 2;
 const AUTH_ERROR_RE = /authentication_error|OAuth (?:token|session) (?:has )?expired|could not be refreshed|token (?:has )?expired|invalid[_ ]grant|refresh(?:ing)? (?:the )?token failed|re-?authenticate|please (?:log ?in|sign ?in)|\b401\b/i;
 /** The CLI's context-overflow errors: a request over the size cap (HTTP 413), a conversation over
  *  the context window, or the 1M-context usage-credit wall. Any of them triggers autoRecoverFrom413.
@@ -202,6 +213,30 @@ export class ManagedSession {
   /** Injected by SessionManager: the note Claude reads ahead of a guest's message, saying who wrote
    *  it and the owner's rules for them (shares.ts guestNote). */
   describeAuthor: ((author: MessageAuthor) => string) | null = null;
+  /** Injected by SessionManager (project.ts): deliver a <<to_main>>/<<to_task>> message from this
+   *  session to another session of its project. Returns a line for this chat saying what happened. */
+  onProjectMessage: ((m: { to: 'main' | 'note' | { task: string } | { session: string }; message: string; checkin?: { summary: string; files: string[] } }) => string | null) | null = null;
+  /** Injected by SessionManager: <<new_task>> starts a task in this session's project. */
+  onNewTask: ((m: { name: string; brief: string }) => string | null) | null = null;
+  /** Injected by SessionManager: the note a project's main session reads on each message while it
+   *  has tasks (who else works in the folder, and the commit rules); null otherwise. */
+  describeProject: (() => string | null) | null = null;
+  /** Project sentinels already acted on, so a message seen twice is never delivered twice. */
+  private seenProjectSentinels = new Set<string>();
+  /** Injected by SessionManager: API credits (api-credits.ts), for when the subscription is out. */
+  apiCredits: ApiCredits | null = null;
+  /** The owner approved API credits for this session until then (epoch ms), for one usage outage. */
+  apiApprovedUntilMs = 0;
+  /** The turn that just failed on a usage limit should be retried on API credits. */
+  private pendingApiRetry = false;
+  /** A retry on API credits is about to run: hold the queue until it has. */
+  private apiRetryScheduled = false;
+  /** Whether the last turn ran on API credits (to say so when it changes). */
+  private lastTurnOnApi = false;
+  /** Background work that died with the last turn: what to tell Claude once the turn has wound down. */
+  private pendingBgRecovery: string | null = null;
+  /** Times in a row Claude was told its background work died, with no person writing in between. */
+  private bgRecoveries = 0;
   /** Server-side AskUserQuestion gate. Set when the model asks a question; cleared on
    *  answer, fresh user input, or timeout (after which the session proceeds on its own).
    *  Distinct from the client-side pendingQuestion, which drives the answer UI. */
@@ -741,8 +776,9 @@ export class ManagedSession {
 
   /** True when a usage-limit rejection caused this failure. Prefer the CLI's own
    *  rate_limit_event (recorded before the error surfaces) over error-text matching. */
-  private isRateLimited(errorText: string): boolean {
-    if (getRateLimitInfo().session?.status === 'rejected') return true;
+  private isRateLimited(errorText: string, onApi = false): boolean {
+    // A turn on API credits isn't held up by the subscription's window, only by its own limits.
+    if (!onApi && getRateLimitInfo().session?.status === 'rejected') return true;
     return /usage limit|rate.?limit(ed)?|limit (reached|will reset)|hit your.*limit/i.test(errorText);
   }
 
@@ -761,15 +797,18 @@ export class ManagedSession {
    *  automatically. Reuses the wakeup machinery so it persists across restarts, shows the
    *  countdown banner (with cancel) in the UI, and is cleared by fresh user input.
    *  Applies to EVERY session — Goal Mode and ProjectRunner add their own supervision on top. */
-  private sleepUntilRateLimitReset(): void {
+  private sleepUntilRateLimitReset(retryInMs?: number): void {
     const rl = getRateLimitInfo();
     const resetsAtIso = rl.session?.resetsAt ?? rl.weekly?.resetsAt ?? null;
     const resetMs = resetsAtIso ? new Date(resetsAtIso).getTime() : NaN;
     // +60s past the boundary so we never fire into a still-closed window; if the CLI never
-    // told us the reset time, probe again in an hour rather than giving up.
-    const fireAtMs = !isNaN(resetMs) && resetMs > Date.now()
-      ? resetMs + 60_000
-      : Date.now() + 60 * 60_000;
+    // told us the reset time, probe again in an hour rather than giving up. A short retry is for
+    // an API-credits turn that hit the API's own rate limit, which has nothing to do with the window.
+    const fireAtMs = retryInMs
+      ? Date.now() + retryInMs
+      : !isNaN(resetMs) && resetMs > Date.now()
+        ? resetMs + 60_000
+        : Date.now() + 60 * 60_000;
     const delaySeconds = Math.max(60, Math.round((fireAtMs - Date.now()) / 1000));
 
     this.clearWakeupTimer();
@@ -783,9 +822,90 @@ export class ManagedSession {
     this.wakeupTimer = setTimeout(() => this.fireWakeup(), delaySeconds * 1000);
 
     const friendly = new Date(fireAtMs).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-    this.emitSystemMessage(`💤 Usage limit reached — auto-resuming at ${friendly}.`);
+    this.emitSystemMessage(retryInMs
+      ? `💳 The API is rate limiting this session — trying again at ${friendly}.`
+      : `💤 Usage limit reached — auto-resuming at ${friendly}.`);
+    // An allowed session that isn't getting API credits: say why, so it isn't a mystery.
+    if (!retryInMs && this.config.apiCredits) {
+      const why = this.apiCredits?.whyNot(false);
+      if (why) this.emitSystemMessage(`💳 Not using API credits: ${why}`);
+    }
     this.broadcast({ type: 'wakeup_scheduled', sessionId: this.id, wakeup: this.pendingWakeup });
     console.log(`[Session ${this.id}] Rate limited — sleeping until ${this.pendingWakeup.scheduledAt}`);
+  }
+
+  /** What api-credits.ts needs to know to decide on a turn. */
+  private apiRequest(opts?: { author?: MessageAuthor }): ApiTurnRequest {
+    return {
+      sessionId: this.id,
+      name: this.config.name,
+      model: this.config.model,
+      allowed: !!this.config.apiCredits,
+      approvedUntilMs: this.apiApprovedUntilMs,
+      byGuest: !!opts?.author && !opts.author.sessionId,
+    };
+  }
+
+  /** A turn on API credits failed because of the credit or the key themselves. Pauses API credits
+   *  and says so; true when that's what it was. */
+  private handleApiFailure(text: string, known: 'key' | 'credits' | null = null): boolean {
+    const kind = known ?? (API_CREDITS_EXHAUSTED_RE.test(text) ? 'credits' : API_KEY_REJECTED_RE.test(text) ? 'key' : null);
+    if (kind === 'credits') {
+      this.apiCredits?.problem('credits');
+      this.emitSystemMessage('💳 The API account is out of credits (or billing failed). API credits are paused for a few hours; waiting for the subscription instead.');
+      return true;
+    }
+    if (kind === 'key') {
+      this.apiCredits?.problem('key');
+      this.emitSystemMessage('💳 Anthropic refused the API key in ~/.clauder/api-key, so API credits are off until it is replaced. Waiting for the subscription instead.');
+      return true;
+    }
+    return false;
+  }
+
+  /** Re-run, on API credits, the turn that just hit the subscription's usage limit. Runs after the
+   *  failed turn has fully wound down (not inside it, which would tangle their processes). */
+  private scheduleApiRetry(): void {
+    this.apiRetryScheduled = true;
+    setImmediate(() => this.fireApiRetry());
+  }
+
+  private fireApiRetry(): void {
+    this.apiRetryScheduled = false;
+    if (this.status === 'idle') {
+      // The rejected request may never have reached Claude: send it again if nothing came back
+      // from it, otherwise carry on from where the turn got to.
+      let lastIdx = -1;
+      for (let i = this.messages.length - 1; i >= 0; i--) if (this.messages[i].role === 'user') { lastIdx = i; break; }
+      const lastUser = lastIdx >= 0 ? this.messages[lastIdx] : undefined;
+      const progressed = lastIdx >= 0 && this.messages.slice(lastIdx + 1).some(m => m.role === 'assistant');
+      const send = (lastUser && !progressed)
+        ? (this.messages = this.messages.filter(m => m.id !== lastUser.id), this.sendMessage(lastUser.content, lastUser.images, { internal: true, files: lastUser.files, author: lastUser.author }))
+        : this.sendMessage('Continue where you left off.', [], { internal: true });
+      send.catch(err => console.error(`[Session ${this.id}] API credits retry failed: ${err.message}`));
+      return;
+    }
+    // Something else got in first: the queue we held back carries on.
+    if (this.queuedMessages.length > 0 && this.status !== 'working') {
+      const next = this.queuedMessages.shift()!;
+      this.broadcast({ type: 'queue_update', sessionId: this.id, queue: [...this.queuedMessages] });
+      this.sendMessage(next.text, next.images, { internal: next.internal, files: next.files, model: next.model, effort: next.effort as EffortLevel | undefined, author: next.author }).catch(err => {
+        console.error(`[Session ${this.id}] Error processing queued message:`, err);
+      });
+    }
+  }
+
+  /** The owner chose to use API credits for this session right now: approve it for the rest of the
+   *  usage outage, and if it's sleeping on the limit, wake it. */
+  approveApiNow(untilMs: number): void {
+    this.apiApprovedUntilMs = untilMs;
+    if (this.status !== 'idle') return; // a turn in progress picks it up on its next one
+    if (this.pendingWakeup?.toolUseId === ManagedSession.RATE_LIMIT_WAKEUP_ID) {
+      this.cancelWakeup();
+      this.sendMessage('Continue where you left off.', [], { internal: true }).catch(err => {
+        console.error(`[Session ${this.id}] Couldn't resume on API credits: ${err.message}`);
+      });
+    }
   }
 
   /** Arm the answer gate when the model asks a question. If no answer arrives within
@@ -1148,6 +1268,15 @@ export class ManagedSession {
   setPinned(pinned: boolean): void {
     this.config = { ...this.config, pinned };
     this.broadcast({ type: 'pinned_changed', sessionId: this.id, pinned });
+  }
+
+  /** Change config fields only Clauder reads (a Scratch conversation's keep, or its becoming a
+   *  session of its own) and send every client the new config. `drop` removes fields. */
+  updateConfig(patch: Partial<SessionConfig>, drop: (keyof SessionConfig)[] = []): void {
+    const next: SessionConfig = { ...this.config, ...patch };
+    for (const key of drop) delete next[key];
+    this.config = next;
+    this.broadcast({ type: 'config_changed', sessionId: this.id, config: this.config });
   }
 
   /** Pin/unpin a single chat message so it stays visible in a sticky section above the
@@ -1563,6 +1692,8 @@ export class ManagedSession {
       return;
     }
 
+    if (!opts?.internal) this.bgRecoveries = 0;
+
     // Any new user input cancels a pending wakeup — Claude has fresh input now.
     // Skip for internal messages: a wakeup-fired message shouldn't cancel itself.
     if (this.pendingWakeup && !opts?.internal) {
@@ -1661,6 +1792,10 @@ export class ManagedSession {
     let effectiveEffort = '';
     let turnStopReason = '';
     let turnUsage: { input: number; cacheRead: number; cacheWrite: number; output: number; thinking: number } | null = null;
+    // Set when this turn runs on API credits instead of the subscription (api-credits.ts).
+    let apiPlan: ApiTurnPlan | null = null;
+    // Set when the CLI reports, on an API-credits turn, that the key or the account won't do.
+    let apiFatal: 'key' | 'credits' | null = null;
     const resetStallTimer = () => {
       if (stallTimer) clearTimeout(stallTimer);
       stallTimer = setTimeout(() => {
@@ -1678,6 +1813,10 @@ export class ManagedSession {
       const effectiveMode = opts?.planMode ? 'plan' : this.permissionMode;
       const flags: string[] = ['--permission-mode', effectiveMode];
 
+      // Out of subscription usage, on a session the owner allowed (or approved just now): run on
+      // API credits. The plan is null on any ordinary turn, which changes nothing below.
+      apiPlan = this.apiCredits?.plan(this.apiRequest(opts)) ?? null;
+
       if (this.sdkSessionId) {
         flags.push('--resume', this.sdkSessionId);
         if (this.needsFork) {
@@ -1689,7 +1828,7 @@ export class ManagedSession {
       // this subscription), at high effort — regardless of the session's configured model.
       // This is a per-turn override ONLY; this.config.model is left untouched.
       if (opts?.planMode) {
-        effectiveModel = this.planFallbackToOpus ? 'claude-opus-5-5' : 'claude-fable-5-1';
+        effectiveModel = this.planFallbackToOpus || apiPlan ? 'claude-opus-5-5' : 'claude-fable-5-1';
         flags.push('--model', effectiveModel);
         flags.push('--effort', 'high'); // planning quality drives the cheap execution that follows — exempt from the cap
         effectiveEffort = 'high';
@@ -1697,7 +1836,8 @@ export class ManagedSession {
         // Per-turn override (the "Send with" chip): use opts.model/opts.effort for THIS turn
         // only — never mutate this.config. Mirrors the planMode override above. The chosen
         // effort still feeds the quota guardrail below, so an override can't dodge the cap.
-        const turnModel = (typeof opts?.model === 'string' && opts.model.startsWith('claude-')) ? opts.model : this.config.model;
+        let turnModel = (typeof opts?.model === 'string' && opts.model.startsWith('claude-')) ? opts.model : this.config.model;
+        if (apiPlan) turnModel = apiPlan.modelOverride ?? capApiModel(turnModel);
         const turnEffort = opts?.effort ?? (this.config.effort as EffortLevel | undefined);
         effectiveModel = turnModel || '(default)';
         if (turnModel) {
@@ -1707,10 +1847,11 @@ export class ManagedSession {
         // Cache-safe — same model, fewer thinking tokens. Internal turns (wakeups, plan
         // steps, monitors) are capped too: they're exactly the routine work that shouldn't
         // burn the window. Announce engage/disengage once, not every turn.
-        const cap = effortCapForQuota(getRateLimitInfo().session?.usedPercent);
+        // On API credits there's no window to protect, but thinking costs money: cap at "high".
+        const cap = apiPlan ? 'high' : effortCapForQuota(getRateLimitInfo().session?.usedPercent);
         const { effort: cappedEffort, capped } = capEffort(turnEffort, cap);
         effectiveEffort = cappedEffort ?? '(default)';
-        if (capped !== this.quotaCapActive) {
+        if (!apiPlan && capped !== this.quotaCapActive) {
           this.quotaCapActive = capped;
           this.emitSystemMessage(capped
             ? `🪫 Credit guardrail: 5-hour window at ${getRateLimitInfo().session?.usedPercent}% — effort capped at "${cap}" until it drops below ${cap === 'low' ? 90 : 75}%. Plans are exempt; lower the cap by resting or raise it in Settings.`
@@ -1720,6 +1861,23 @@ export class ManagedSession {
           flags.push('--effort', cappedEffort);
         }
       }
+
+      if (apiPlan) {
+        // The key reaches the CLI through apiKeyHelper (never the environment, which every command
+        // this session runs would inherit); the CLI itself stops the turn at the budget.
+        flags.push('--settings', apiPlan.settingsJson, '--max-budget-usd', String(apiPlan.maxBudgetUsd));
+        this.apiCredits?.turnStarted(this.id);
+        if (!this.lastTurnOnApi) {
+          const back = new Date(apiPlan.subscriptionBackAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+          this.emitSystemMessage(
+            `💳 Usage limit reached — continuing on API credits until your subscription is back (${back}). ` +
+            `Each turn is capped at $${apiPlan.maxBudgetUsd}; $${apiPlan.monthLeftUsd.toFixed(2)} left this month. ` +
+            'The first turn re-reads the whole conversation at full price.');
+        }
+      } else if (this.lastTurnOnApi) {
+        this.emitSystemMessage('↩ Back on your subscription.');
+      }
+      this.lastTurnOnApi = !!apiPlan;
 
       // Controller mode: load the Clauder MCP server so this session can orchestrate others
       if (this.config.controllerMode && CLAUDER_MCP_PATH) {
@@ -1786,9 +1944,23 @@ export class ManagedSession {
         '<<notes>>{"content":"<markdown>"}<<>>. Update it whenever this info changes; leave it out of your turn entirely ' +
         'when there\'s nothing worth noting yet. Keep it short and practical, not a running log.',
         'SUB-AGENTS (the Task/Agent tool) run OUTSIDE Clauder\'s control. A sub-agent you spawn does NOT inherit this guidance and CANNOT use Clauder\'s sentinels (<<monitor>>, <<schedule_trigger>>) or ScheduleWakeup — its output is not bridged back to Clauder, and it cannot wake this session; any Monitor/cron/loop/scheduler tool it calls silently does nothing. Therefore YOU, the top-level session, own ALL monitoring and scheduling. Do not delegate a "watch this" or "check back later" job to a sub-agent. Instead: set up the <<monitor>> or <<schedule_trigger>> YOURSELF (the monitor runs server-side and will wake you even while a sub-agent is running), and when you spawn a sub-agent, put an explicit line in its task prompt telling it NOT to use the Monitor tool or any scheduler/watcher — it should do its bounded task and return its result to you, and you handle any watching or follow-up.',
+        // Context economy: everything a tool returns stays in this session's context and is
+        // re-read from cache on every later turn, so bulky digging is cheaper in a sub-agent
+        // (Sonnet by default, see CLAUDE_CODE_SUBAGENT_MODEL) that hands back only its conclusion.
+        'CONTEXT ECONOMY: every tool result stays in your context and is re-read (and billed) on every later turn. ' +
+        'Delegate broad work whose raw output you won\'t need — codebase-wide searches, reading many files to learn how something works, digging through logs — to a sub-agent (Task/Agent tool), and ask it to return only its conclusion with the file paths and line numbers that matter. ' +
+        'Do quick, targeted lookups yourself: a sub-agent starts cold, so delegating a single grep or one known file costs more. ' +
+        'Keep command output short: pipe long output through tail, head or grep, and use quiet flags, instead of printing whole logs or build output.',
         // Fixed text: the roster path depends only on the session id, so this sentence never
         // changes and never invalidates the prompt cache — even when the user switches tasks.
-        'This Clauder session can hold several tasks: separate conversations about the same project that the user switches between. You only see the current one. A roster of the session\'s tasks (names, when each was last active, how each started) is kept at `' + taskRosterPath(this.id) + '`. Read it only if the user refers to another task or it would clearly help to know what else is going on in this session; otherwise ignore it.',
+        // A project task (project.ts) gets its rules here instead; it's a new session, so they're
+        // part of its prompt from its first turn, and fixed for its life. A Scratch conversation
+        // (scratch.ts) is a task of Scratch that has no project rules, so it gets neither.
+        this.config.scratchConversation
+          ? 'This is a quick conversation in Clauder\'s Scratch area, which runs in a scratch folder: a place for questions and one-off jobs, not a project. Work in other folders when the request is about them.'
+          : this.config.mainSessionId
+          ? taskSystemPrompt(this.config.mainSessionId)
+          : 'This Clauder session can hold several tasks: separate conversations about the same project that the user switches between. You only see the current one. A roster of the session\'s tasks (names, when each was last active, how each started) is kept at `' + taskRosterPath(this.id) + '`. Read it only if the user refers to another task or it would clearly help to know what else is going on in this session; otherwise ignore it.',
       ];
 
       // Custom Plan: on a plan turn ONLY, instruct the planner to produce per-step model
@@ -1865,7 +2037,9 @@ export class ManagedSession {
                 const content = typeof m.content === 'string' ? m.content : '[complex content]';
                 const truncated = content.length > 500 ? content.slice(0, 500) + '...' : content;
                 // A guest's message stays attributed here too, or it would read as the owner's.
-                const who = m.role === 'user' ? (m.author ? `${m.author.name} (a guest on a share link)` : 'User') : 'Assistant';
+                const who = m.role === 'user'
+                  ? (m.author ? `${m.author.name} (${m.author.sessionId ? 'another session in this project' : 'a guest on a share link'})` : 'User')
+                  : 'Assistant';
                 return `${who}: ${truncated}`;
               })
               .join('\n\n');
@@ -1921,7 +2095,15 @@ export class ManagedSession {
       const attribution = opts?.author
         ? (this.describeAuthor?.(opts.author) ?? `[Clauder: this message is from ${opts.author.name}, a guest, not from the session's owner.]`)
         : null;
-      const cliMessage = attribution ? `${attribution}\n\n${message}` : message;
+      // A project's main session, while it has tasks, gets a note on each message: who else works
+      // in this folder and the commit rules (project.ts). In the message rather than the system
+      // prompt so it never costs the prompt cache. Not on a message from another session of the
+      // project (its own note covers it), nor on a slash command, which a prefix would break.
+      const projectNote = opts?.author?.sessionId || message.trimStart().startsWith('/')
+        ? null
+        : (this.describeProject?.() ?? null);
+      const prefix = [projectNote, attribution].filter(Boolean).join('\n\n');
+      const cliMessage = prefix ? `${prefix}\n\n${message}` : message;
 
       // Build stdin message
       const files = opts?.files;
@@ -1968,9 +2150,11 @@ export class ManagedSession {
         const pathNote = noteLines.length ? '\n\n[' + noteLines.join('\n') + ']' : '';
 
         const defaultPrompt = images?.length ? 'What is in this image?' : 'Examine the attached file(s).';
-        const textContent = (message ? cliMessage : defaultPrompt) + pathNote;
+        const textContent = (message || defaultPrompt) + pathNote;
 
         const contentBlocks: any[] = [
+          // A guest's note (and the project note) leads, so it covers the attachments as well as the words.
+          ...(prefix ? [{ type: 'text' as const, text: prefix }] : []),
           ...(images ?? []).map(img => ({
             type: 'image' as const,
             source: { type: 'base64' as const, media_type: img.mimeType, data: img.data },
@@ -1995,6 +2179,8 @@ export class ManagedSession {
       // Stale-wait safety net (see STALE_WAIT_INTENT_RE below): track whether THIS turn used
       // any real scheduling mechanism, and what the last non-empty assistant text was.
       let usedSchedulingThisTurn = false;
+      // Background commands/agents this turn starts: they stop when it ends (background-tasks.ts).
+      const background = new BackgroundTracker();
       let lastAssistantText = '';
 
       for await (const msg of this.readNdjson(this.activeProcess)) {
@@ -2054,6 +2240,17 @@ export class ManagedSession {
               // The SDK injects a user message with the compacted summary right after this
               this.awaitingCompactSummary = true;
             }
+            // A refused key or empty account makes the CLI retry for minutes (it emits api_retry
+            // while it does): stop at the first sign instead of waiting it out.
+            if (subtype === 'api_retry' && apiPlan && !apiFatal) {
+              const why = String((msg as any).error ?? '');
+              apiFatal = /^(authentication_failed|oauth_org_not_allowed|verification_required)$/.test(why) ? 'key'
+                : /^(billing_error|account_on_hold)$/.test(why) ? 'credits' : null;
+              if (apiFatal) {
+                console.log(`[Session ${this.id}] API credits turn: CLI reports ${why} — stopping it`);
+                try { this.activeProcess?.kill('SIGTERM'); } catch { /* already gone */ }
+              }
+            }
             this.emitDebugLog('sdk_event', subtype || 'system', JSON.stringify(msg, null, 2));
             break;
           }
@@ -2096,6 +2293,7 @@ export class ManagedSession {
               ? thinkingText.slice(0, MAX_THINKING_LENGTH) + '…'
               : thinkingText;
             if (toolUses.some(tu => tu.name === 'add_watch')) usedSchedulingThisTurn = true;
+            for (const tu of toolUses) background.onToolUse(tu);
 
             if (toolUses.length > 0) {
               const lastTool = toolUses[toolUses.length - 1];
@@ -2377,6 +2575,42 @@ export class ManagedSession {
                   }
                 }
               }
+
+              // Detect <<to_main>>, <<to_task>> and <<new_task>> — sessions of a project talking to
+              // each other: a task checking in or asking the main session something, an answer, a
+              // spin-off. SessionManager delivers them (project.ts); each leaves a line in this
+              // chat. Keyed by message and position, so a message seen twice is delivered once.
+              if (this.onProjectMessage || this.onNewTask) {
+                const PROJ_RE = /<<(to_main|to_task|to_session|new_task|note)>>((?:(?!<<)[\s\S])*?)<<>>/g;
+                let pm: RegExpExecArray | null;
+                while ((pm = PROJ_RE.exec(text)) !== null) {
+                  const key = `${msgId}:${pm.index}:${pm[1]}`;
+                  if (this.seenProjectSentinels.has(key)) continue;
+                  if (this.seenProjectSentinels.size > 500) this.seenProjectSentinels.clear();
+                  this.seenProjectSentinels.add(key);
+                  try {
+                    const p = JSON.parse(pm[2].trim());
+                    let note: string | null = null;
+                    if (pm[1] === 'new_task') {
+                      if (typeof p.name === 'string' && typeof p.brief === 'string' && this.onNewTask) {
+                        note = this.onNewTask({ name: p.name, brief: p.brief });
+                      }
+                    } else if (pm[1] === 'note') {
+                      if (this.onProjectMessage) note = this.onProjectMessage({ to: 'note', message: String(p.text ?? p.message ?? '') });
+                    } else if (this.onProjectMessage) {
+                      const to: 'main' | { task: string } | { session: string } = pm[1] === 'to_main' ? 'main'
+                        : pm[1] === 'to_session' ? { session: String(p.session ?? '') } : { task: String(p.task ?? '') };
+                      const checkin = pm[1] === 'to_main' && p.checkin === true
+                        ? { summary: String(p.summary ?? ''), files: Array.isArray(p.files) ? p.files.filter((f: unknown): f is string => typeof f === 'string').slice(0, 200) : [] }
+                        : undefined;
+                      note = this.onProjectMessage({ to, message: String(p.message ?? ''), checkin });
+                    }
+                    if (note) this.emitSystemMessage(note);
+                  } catch (err) {
+                    console.error(`[Session ${this.id}] Failed to parse ${pm[1]} sentinel:`, err);
+                  }
+                }
+              }
             }
 
             // Detect ScheduleWakeup tool uses — set up a server-side timer to auto-resume
@@ -2517,6 +2751,7 @@ export class ManagedSession {
                     originalLength: resultText.length > MAX_TOOL_RESULT_LENGTH ? resultText.length : undefined,
                   };
 
+                  background.onToolResult(toolUseId, resultText);
                   this.attachToolResult(toolUseId, result);
                   this.broadcast({ type: 'tool_result', sessionId: this.id, toolUseId, result });
                   this.emitDebugLog('tool_result', this.findToolName(toolUseId) || 'tool_result', truncated, toolUseId);
@@ -2534,7 +2769,8 @@ export class ManagedSession {
             // shape — the percentages are under `unifiedWindows`, not top-level.
             try {
               const parsed = parseRateLimitEvent(rle.rate_limit_info);
-              if (parsed.session || parsed.weekly || parsed.weeklyOverage) {
+              // Not from a turn on API credits: that isn't the subscription's usage.
+              if (!apiPlan && (parsed.session || parsed.weekly || parsed.weeklyOverage)) {
                 recordSubscriptionLimits(parsed);
               }
             } catch (err) {
@@ -2560,7 +2796,10 @@ export class ManagedSession {
             const newTotal = Math.max(this.totalCostUsd, rawTotal);
             const costDelta = newTotal - this.totalCostUsd;
             this.totalCostUsd = newTotal;
-            if (costDelta > 0) recordCostDelta(costDelta);
+            if (costDelta > 0) {
+              if (apiPlan) this.apiCredits?.record(this.id, this.config.name, costDelta, effectiveModel);
+              else recordCostDelta(costDelta);
+            }
             this.lastActiveAt = new Date().toISOString();
             const success = resultMsg.subtype === 'success';
             turnStopReason = String(resultMsg.subtype || '');
@@ -2582,7 +2821,12 @@ export class ManagedSession {
               // retry on Opus (deferred to after this query finishes, mirroring
               // pendingPostQueryRecover). Don't set error, and don't fall into the
               // isRateLimited() sleep branch below — try Opus first.
-              if (opts?.planMode && !this.planFallbackToOpus && this.planShouldFallbackToOpus(errorText)) {
+              if (apiPlan && resultMsg.subtype === 'error_max_budget_usd') {
+                // Stopped by the turn's own spending limit: the work so far is kept.
+                this.emitSystemMessage(`💳 Stopped at this turn's $${apiPlan.maxBudgetUsd} API limit. The work so far is kept; send a message to carry on, or raise the limit in the usage panel.`);
+              } else if (apiPlan && this.handleApiFailure(errorText)) {
+                this.sleepUntilRateLimitReset();
+              } else if (opts?.planMode && !this.planFallbackToOpus && this.planShouldFallbackToOpus(errorText)) {
                 console.log(`[Session ${this.id}] Plan model (Fable) unavailable/exhausted — will retry on Opus`);
                 this.pendingPlanFallbackRetry = true;
               } else if (CONTEXT_ERROR_RE.test(errorText) && this.sdkSessionId) {
@@ -2601,10 +2845,13 @@ export class ManagedSession {
               } else if (AUTH_ERROR_RE.test(errorText)) {
                 console.log(`[Session ${this.id}] Auth error — login expired: ${errorText.slice(0, 120)}`);
                 this.error = 'AUTH_EXPIRED';
-              } else if (this.isRateLimited(errorText)) {
+              } else if (this.isRateLimited(errorText, !!apiPlan)) {
                 // Out of usage — sleep until the window resets and continue automatically.
-                // Not set as an error: the session isn't broken, it's waiting.
-                this.sleepUntilRateLimitReset();
+                // Not set as an error: the session isn't broken, it's waiting. On an allowed
+                // session with API credits to spend, carry on right away on those instead.
+                if (apiPlan) this.sleepUntilRateLimitReset(API_RATE_LIMIT_RETRY_MS);
+                else if (this.apiCredits?.plan(this.apiRequest(opts))) this.pendingApiRetry = true;
+                else this.sleepUntilRateLimitReset();
               } else {
                 this.error = errorText;
               }
@@ -2690,13 +2937,13 @@ export class ManagedSession {
         ? ` in=${turnUsage.input} cacheR=${turnUsage.cacheRead} cacheW=${turnUsage.cacheWrite} out=${turnUsage.output} think=${turnUsage.thinking}`
         : '';
       console.log(
-        `[Session ${this.id}] Turn done [${this.config.name}] model=${effectiveModel} effort=${effectiveEffort || '(default)'} ` +
+        `[Session ${this.id}] Turn done [${this.config.name}] model=${effectiveModel} effort=${effectiveEffort || '(default)'}${apiPlan ? ' billing=api' : ''} ` +
         `${((Date.now() - turnStartMs) / 1000).toFixed(1)}s cost=$${turnCost.toFixed(2)} ` +
         `tools=${turnToolCount} stop=${turnStopReason || 'unknown'}${usageStr}${quotaStr}`
       );
       // Feed the cost ledger (the /cost popover's by-model 24h/7d rollup). Only real turns
       // with a usage payload — skip no-op/errored turns that never reached the result event.
-      if (turnUsage && effectiveModel && effectiveModel !== '(default)') {
+      if (turnUsage && effectiveModel && effectiveModel !== '(default)' && !apiPlan) {
         recordTurnCost({
           ts: new Date().toISOString(),
           sessionId: this.id,
@@ -2726,6 +2973,36 @@ export class ManagedSession {
         this.firePlanFallbackRetry();
       }
 
+      // Background work this turn started that nothing waited for dies with the turn. Say so, and,
+      // unless something is already coming back for it or the session drives itself, have Claude
+      // redo it so it survives. Only after a turn that ran to its end (not a stop or an error).
+      const stranded = turnStopReason === 'success' && !usedSchedulingThisTurn ? background.outstanding() : [];
+      if (stranded.length) {
+        this.emitSystemMessage(strandedLine(stranded));
+        if (!this.pendingWakeup && this.bgRecoveries < MAX_BG_RECOVERIES
+          && this.config.modelPlan?.status !== 'running' && this.config.goal?.status !== 'active') {
+          this.bgRecoveries++;
+          this.pendingBgRecovery = strandedPrompt(stranded);
+        }
+      }
+
+      // The CLI said the key or account won't do and we stopped the turn: pause API credits and
+      // fall back to waiting for the subscription.
+      if (apiFatal) {
+        this.handleApiFailure('', apiFatal);
+        this.sleepUntilRateLimitReset();
+      }
+
+      // The subscription refused this turn but API credits are available: run it again on those.
+      if (this.pendingApiRetry) {
+        this.pendingApiRetry = false;
+        this.scheduleApiRetry();
+      }
+      if (apiPlan && turnCost > 0) {
+        const spent = this.apiCredits?.spentSoFar();
+        if (spent) this.emitSystemMessage(`💳 That turn cost about $${turnCost.toFixed(2)} on API credits ($${spent.month.toFixed(2)} of $${spent.monthlyBudgetUsd} this month).`);
+      }
+
       // Deferred auth-expired surfacing (see the assistant-text sniff): flip the session
       // into the AUTH_EXPIRED state now that the query is done, so the client shows the
       // re-authenticate banner instead of leaving the failure as ordinary chat text.
@@ -2748,6 +3025,7 @@ export class ManagedSession {
       // own cadence) so skip there — this is only for turns with no other safety net.
       if (
         !usedSchedulingThisTurn
+        && !this.pendingBgRecovery
         && !this.pendingWakeup
         && this.config.modelPlan?.status !== 'running'
         && this.config.goal?.status !== 'active'
@@ -2776,6 +3054,16 @@ export class ManagedSession {
       // (its narrow anchored check is the one safe transcript signal), and if the process
       // then died the completion path that would consume it never runs.
       const lastDebugEntries = this.debugLog.slice(-5).map(e => e.content).join(' ');
+      // On API credits, a refused key or empty account is not a login problem and not the
+      // subscription's window: pause API credits and wait for the subscription instead.
+      if (apiPlan && this.handleApiFailure(`${errMsg} ${lastDebugEntries}`, apiFatal)) {
+        this.status = 'idle';
+        this.error = null;
+        this.currentToolActivity = null;
+        this.sleepUntilRateLimitReset();
+        this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle', waitingFor: null });
+        return;
+      }
       const hasAuthError = this.pendingAuthExpired || AUTH_ERROR_RE.test(lastDebugEntries) || AUTH_ERROR_RE.test(errMsg);
       this.pendingAuthExpired = false;
       if (hasAuthError) {
@@ -2835,11 +3123,13 @@ export class ManagedSession {
 
       // Out of usage (process died on a rate-limit rejection): sleep until the window
       // resets and continue automatically instead of stranding the session in error.
-      if (this.isRateLimited(errMsg)) {
+      if (this.isRateLimited(errMsg, !!apiPlan)) {
         this.status = 'idle';
         this.error = null;
         this.currentToolActivity = null;
-        this.sleepUntilRateLimitReset();
+        if (apiPlan) this.sleepUntilRateLimitReset(API_RATE_LIMIT_RETRY_MS);
+        else if (this.apiCredits?.plan(this.apiRequest(opts))) this.scheduleApiRetry();
+        else this.sleepUntilRateLimitReset();
         this.broadcast({ type: 'state_change', sessionId: this.id, status: 'idle', waitingFor: null });
         return;
       }
@@ -2906,6 +3196,7 @@ export class ManagedSession {
       });
     } finally {
       if (stallTimer) clearTimeout(stallTimer);
+      if (apiPlan) this.apiCredits?.turnEnded(this.id);
       // Close stdin if still open (from keepStdinOpen for AskUserQuestion support)
       try { this.activeProcess?.stdin?.end(); } catch {}
       this.activeProcess = null;
@@ -2923,8 +3214,10 @@ export class ManagedSession {
     // into the closed window, fail each one, and re-arm repeatedly. The queue drains after
     // the auto-resume turn instead. (Claude-scheduled wakeups don't hold the queue: fresh
     // user input cancels those by design.)
+    const bgRecovery = this.pendingBgRecovery;
+    this.pendingBgRecovery = null;
     const sleepingOnRateLimit = this.pendingWakeup?.toolUseId === ManagedSession.RATE_LIMIT_WAKEUP_ID;
-    if (this.queuedMessages.length > 0 && this.status === 'idle' && !sleepingOnRateLimit) {
+    if (this.queuedMessages.length > 0 && this.status === 'idle' && !sleepingOnRateLimit && !this.apiRetryScheduled) {
       const next = this.queuedMessages.shift()!;
       this.broadcast({
         type: 'queue_update',
@@ -2936,6 +3229,12 @@ export class ManagedSession {
       // that were queued while busy still skip task-switch classification.
       this.sendMessage(next.text, next.images, { internal: next.internal, files: next.files, model: next.model, effort: next.effort as EffortLevel | undefined, author: next.author }).catch(err => {
         console.error(`Error processing queued message for session ${this.id}:`, err);
+      });
+    } else if (bgRecovery && this.queuedMessages.length === 0 && this.status === 'idle' && !this.pendingWakeup && !this.apiRetryScheduled) {
+      // Nothing waiting from a person: tell Claude its background work died with the turn.
+      console.log(`[Session ${this.id}] Background work stopped with the turn — telling Claude (${this.bgRecoveries}/${MAX_BG_RECOVERIES})`);
+      this.sendMessage(bgRecovery, [], { internal: true }).catch(err => {
+        console.error(`Error sending background recovery for session ${this.id}:`, err);
       });
     }
   }

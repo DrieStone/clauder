@@ -43,7 +43,89 @@ export interface SessionConfig {
    *  steps. Null/absent = no plan running. See ModelPlan; declared by Claude's `<<model_plan>>`
    *  sentinel and executed by model-plan-runner.ts. */
   modelPlan?: ModelPlan | null;
+  /** Set on a task: the id of its project's main session. A task is a full session of its own
+   *  (its own conversation, model and status, able to run alongside the others) in the main
+   *  session's folder; the dashboard shows the project as one card. Absent on a main or a
+   *  standalone session. Only the main session commits (see project.ts). */
+  mainSessionId?: string;
+  /** A conversation in Scratch (its mainSessionId is the Scratch session): a quick conversation
+   *  of its own in the scratch folder, without project rules (Scratch has nothing to commit).
+   *  Deleted after SCRATCH_EXPIRY_DAYS untouched, unless `keep`. See server/src/scratch.ts. */
+  scratchConversation?: boolean;
+  /** A Scratch conversation the owner kept: it never expires. */
+  keep?: boolean;
+  /** On the Scratch session: when its own conversation moved out into the first Scratch
+   *  conversation (a one-time step; later messages to it are scheduled jobs). */
+  scratchSplitAt?: string;
+  /** Sessions (main session ids) this one may message with <<to_session>> when the owner asks it to.
+   *  A session a message came from may always be answered, whitelisted or not. */
+  canMessage?: string[];
+  /** The owner lets this session run on API credits when the subscription is out of usage
+   *  (server/src/api-credits.ts). Off unless set: API credits are for important work only. */
+  apiCredits?: boolean;
 }
+
+/** What API credits may be spent on, and how much (server/src/api-credits.ts). The key itself
+ *  lives in ~/.clauder/api-key, never here. */
+export interface ApiCreditsSettings {
+  /** Master switch. Off, nothing ever runs on API credits. */
+  enabled: boolean;
+  /** Stop for the calendar month at this much estimated spend. */
+  monthlyBudgetUsd: number;
+  dailyBudgetUsd: number;
+  /** One turn is cut off at this much (the CLI's --max-budget-usd). */
+  perTurnBudgetUsd: number;
+  /** 'session' = the model the session is on (Fable becomes Opus 5.5); or a model ID. */
+  model: string;
+  /** For a key that isn't tied to one workspace: the workspace to bill ("wrkspc_..."), sent as the
+   *  anthropic-workspace-id header. Not a secret. Empty for a workspace key. */
+  workspaceId: string;
+}
+
+export const DEFAULT_API_CREDITS_SETTINGS: ApiCreditsSettings = {
+  enabled: false,
+  // The credit is $200 a month; spend is estimated from the CLI's own cost figure, so keep a margin.
+  monthlyBudgetUsd: 170,
+  dailyBudgetUsd: 40,
+  perTurnBudgetUsd: 15,
+  model: 'session',
+  workspaceId: '',
+};
+
+/** API credits as the owner's browser sees them. */
+export interface ApiCreditsStatus {
+  settings: ApiCreditsSettings;
+  /** ~/.clauder/api-key: not there, not an Anthropic key, or usable. */
+  keyState: 'missing' | 'invalid' | 'ok';
+  /** The key's last four characters, to tell keys apart. */
+  keyHint: string | null;
+  /** Local calendar month ("2026-10") and day ("2026-10-09") the figures below are for. */
+  month: string;
+  day: string;
+  monthSpentUsd: number;
+  daySpentUsd: number;
+  /** API credits are paused (out of credits, or the key was refused) until this time. */
+  blockedUntil: string | null;
+  blockedReason: string | null;
+  /** True while the subscription is out of usage, i.e. API credits would be used right now. */
+  subscriptionBlockedUntil: string | null;
+  /** Sessions running a turn on API credits right now. */
+  activeSessionIds: string[];
+  /** This month's biggest spenders. */
+  topSessions: { sessionId: string; name: string; usd: number }[];
+  /** The latest API turns, newest first. */
+  recent: { at: string; sessionId: string; name: string; usd: number; model: string }[];
+}
+
+/** Scratch (server/src/scratch.ts): conversations untouched this long are deleted unless kept. */
+export const SCRATCH_EXPIRY_DAYS = 30;
+/** Opening Scratch after this long away starts a fresh conversation. */
+export const SCRATCH_STALE_HOURS = 6;
+/** What a new Scratch conversation runs on. */
+export const SCRATCH_CONVERSATION_MODEL = 'claude-opus-5-5';
+export const SCRATCH_CONVERSATION_EFFORT: EffortLevel = 'medium';
+/** A new Scratch conversation's name until its first message names it. */
+export const SCRATCH_NEW_NAME = 'New conversation';
 
 /** A user-defined session tag: a colored label sessions can carry. The registry of all tags
  *  lives server-side in `~/.clauder/tags.json` (see TagManager); sessions reference tags by id
@@ -53,6 +135,34 @@ export interface TagDef {
   id: string;
   label: string;
   color: string;
+}
+
+/** A status note for a project that's gone quiet (server/src/status-reports.ts): where it stands,
+ *  what was last worked on and what's left, so it can be picked up weeks or months later. Written
+ *  automatically once a session has been idle STATUS_IDLE_DAYS, or on request; one per session (the
+ *  latest), kept in `~/.clauder/status-reports.json` rather than on the session. */
+export interface StatusReport {
+  sessionId: string;
+  /** Markdown, under three headings: Where it stands, Last worked on, Open threads. */
+  text: string;
+  generatedAt: string;
+  /** The session's lastActiveAt when it was written. Later activity means the project moved on. */
+  coversActivityAt: string;
+  /** The task (thread) whose conversation it describes. */
+  threadId: string;
+  trigger: 'idle' | 'manual';
+}
+
+/** Days without activity before Clauder writes a session's status note on its own. */
+export const STATUS_IDLE_DAYS = 15;
+
+/** A dashboard folder: a named group of sessions, only for tidying the dashboard. The list lives
+ *  server-side in `~/.clauder/folders.json` (see FolderManager), not on the sessions; a session is
+ *  in at most one folder. */
+export interface SessionFolder {
+  id: string;
+  name: string;
+  sessionIds: string[];
 }
 
 /** One step of a ModelPlan: run `task` on the given `model`/`effort`. */
@@ -254,7 +364,8 @@ export interface Skill {
   name: string;
   /** Short human-readable description (first line of .md for project skills) */
   description: string;
-  source: 'builtin' | 'project';
+  /** 'clauder': a Clauder command handled by Clauder itself (e.g. /task), never sent to Claude. */
+  source: 'builtin' | 'project' | 'clauder';
 }
 
 export interface QueuedMessage {
@@ -273,9 +384,14 @@ export interface QueuedMessage {
 }
 
 /** Who wrote a user message that didn't come from the session's owner: a guest on a share link. */
+/** Who sent a message, when it wasn't the owner: a guest on a share link (`shareId`), or another
+ *  session of the same project (`sessionId`), e.g. a task checking in with the main session. */
 export interface MessageAuthor {
   name: string;
-  shareId: string;
+  shareId?: string;
+  sessionId?: string;
+  /** A message from a session of another project (<<to_session>>), not one of this project's. */
+  crossProject?: boolean;
 }
 
 /** A link that shares one session with one named guest on the local network (shares.ts). The

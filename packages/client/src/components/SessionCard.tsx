@@ -1,10 +1,11 @@
-import { memo, useState, useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
+import { memo, useState, useCallback, useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { SessionState, ContextUsage } from '@clauder/shared';
 import { StatusBadge } from './StatusBadge';
 import { PermissionModeSelector } from './PermissionModeSelector';
 import { SessionTagChips, usePrimaryTagColor } from './Tags';
 import { useSessionActions } from '../context/SessionContext';
+import { formatTimeAgo } from '../lib/time';
 import { summarizeToolUse } from './MessageBubble';
 import { PermissionPrompt } from './SessionView';
 import Markdown from 'react-markdown';
@@ -78,34 +79,51 @@ interface SessionCardProps {
   unread: boolean;
   /** Stable (setActiveSession), so the memo holds; the card passes its own id. */
   onOpen: (sessionId: string) => void;
+  /** "Where it stands" from a current status note (StatusNote.tsx); the ⓘ shows it instead of the
+   *  short summary. A string, so the memo still holds. */
+  statusNote?: string;
+  /** A project's tasks (server/src/project.ts), summed up by the Dashboard: how many, and how many
+   *  are working or need you. Numbers, so the memo still holds. */
+  tasks?: number;
+  tasksWorking?: number;
+  tasksNeedYou?: number;
+}
+
+/** "🧵 3 tasks · 1 working" on a project's card. */
+function TaskCountChip({ tasks = 0, working = 0, needYou = 0, scratch = false }: { tasks?: number; working?: number; needYou?: number; scratch?: boolean }) {
+  if (!tasks) return null;
+  // Scratch's "tasks" are its conversations (lib/scratch.ts).
+  const noun = scratch ? 'conversation' : 'task';
+  const parts = [`${tasks} ${noun}${tasks !== 1 ? 's' : ''}`];
+  if (needYou) parts.push(`${needYou} need${needYou === 1 ? 's' : ''} you`);
+  else if (working) parts.push(`${working} working`);
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-[10px] leading-3 px-1.5 py-0.5 rounded border whitespace-nowrap ${needYou ? 'text-amber-300 border-amber-600/50 bg-amber-500/10' : working ? 'text-amber-200/90 border-amber-700/40' : 'text-gray-400 border-gray-700'}`}
+      title={scratch ? 'Scratch conversations: quick sessions of their own' : "Tasks: other sessions working in this project's folder"}
+    >
+      {working > 0 && <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />}
+      {scratch ? '💬' : '🧵'} {parts.join(' · ')}
+    </span>
+  );
 }
 
 /** Memoized: the Dashboard re-renders on every WS message, a card only when its own session, tier,
  *  or unread flag changes. Its parts use useSessionActions()/useTagRegistry(), not useSessions(),
  *  since any full-context read inside would re-render it on every message anyway. */
-export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen }: SessionCardProps) {
+export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen, statusNote, tasks, tasksWorking, tasksNeedYou }: SessionCardProps) {
   const onClick = useCallback(() => onOpen(session.id), [onOpen, session.id]);
+  const tip = statusNote ? `📋 Where it stands\n${statusNote}` : session.summary;
+  const taskChip = <TaskCountChip tasks={tasks} working={tasksWorking} needYou={tasksNeedYou} scratch={!!session.config.isScratch} />;
   switch (tier) {
     case 'hot':
-      return <HotSessionCard session={session} unread={unread} onClick={onClick} />;
+      return <HotSessionCard session={session} unread={unread} tip={tip} taskChip={taskChip} onClick={onClick} />;
     case 'warm':
-      return <WarmSessionCard session={session} unread={unread} onClick={onClick} />;
+      return <WarmSessionCard session={session} unread={unread} tip={tip} taskChip={taskChip} onClick={onClick} />;
     case 'history':
-      return <HistorySessionCard session={session} unread={unread} onClick={onClick} />;
+      return <HistorySessionCard session={session} unread={unread} tip={tip} taskChip={taskChip} onClick={onClick} />;
   }
 });
-
-function formatTimeAgo(ts: string): string {
-  const diff = Date.now() - new Date(ts).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'Just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days === 1) return 'Yesterday';
-  return `${days}d ago`;
-}
 
 function formatDate(ts: string): string {
   const d = new Date(ts);
@@ -114,7 +132,7 @@ function formatDate(ts: string): string {
 
 // ─── Hot: active in the past hour. Chat area + input. ─────────────────────────
 
-function HotSessionCard({ session, unread, onClick }: { session: SessionState; unread: boolean; onClick: () => void }) {
+function HotSessionCard({ session, unread, tip, taskChip, onClick }: { session: SessionState; unread: boolean; tip: string | null; taskChip: ReactNode; onClick: () => void }) {
   const { sendMessage, interruptSession, updateLastActive, setPermissionMode, renameSession, respondToPermission } = useSessionActions();
   const [inputValue, setInputValue] = useState('');
   const [, setTick] = useState(0);
@@ -246,7 +264,7 @@ function HotSessionCard({ session, unread, onClick }: { session: SessionState; u
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                   </svg>
                 </button>
-                {session.summary && <SummaryTooltip summary={session.summary} />}
+                {tip && <SummaryTooltip summary={tip} />}
                 {unread && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="Unread messages" />}
               </span>
             )}
@@ -263,6 +281,7 @@ function HotSessionCard({ session, unread, onClick }: { session: SessionState; u
               </span>
             )}
             <SessionTagChips session={session} />
+            {taskChip}
             <PermissionModeSelector
               mode={session.permissionMode}
               onChange={(mode) => setPermissionMode(session.id, mode)}
@@ -382,7 +401,7 @@ function HotSessionCard({ session, unread, onClick }: { session: SessionState; u
 
 // ─── Warm: 1-36 hours. Large card, no chat/input. Click to expand. ────────────
 
-function WarmSessionCard({ session, unread, onClick }: { session: SessionState; unread: boolean; onClick: () => void }) {
+function WarmSessionCard({ session, unread, tip, taskChip, onClick }: { session: SessionState; unread: boolean; tip: string | null; taskChip: ReactNode; onClick: () => void }) {
   const { setPermissionMode, renameSession } = useSessionActions();
   const tagColor = usePrimaryTagColor(session);
   const isWorking = session.status === 'working';
@@ -427,7 +446,7 @@ function WarmSessionCard({ session, unread, onClick }: { session: SessionState; 
         )}
 
         <div className="flex items-start sm:items-center justify-between gap-2 mb-1.5">
-          <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
             {isRenaming ? (
               <input
                 ref={renameInputRef}
@@ -455,7 +474,7 @@ function WarmSessionCard({ session, unread, onClick }: { session: SessionState; 
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                   </svg>
                 </button>
-                {session.summary && <SummaryTooltip summary={session.summary} />}
+                {tip && <SummaryTooltip summary={tip} />}
                 {unread && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="Unread messages" />}
               </span>
             )}
@@ -472,6 +491,7 @@ function WarmSessionCard({ session, unread, onClick }: { session: SessionState; 
               </span>
             )}
             <SessionTagChips session={session} />
+            {taskChip}
             <PermissionModeSelector
               mode={session.permissionMode}
               onChange={(mode) => setPermissionMode(session.id, mode)}
@@ -489,14 +509,13 @@ function WarmSessionCard({ session, unread, onClick }: { session: SessionState; 
           <span>{session.messageCount ?? session.messages.filter(m => m.role !== 'system').length} messages</span>
         </div>
       </button>
-      <ContextBar usage={session.contextUsage} sessionId={session.id} />
     </div>
   );
 }
 
 // ─── History: 36+ hours. Minimal row. ─────────────────────────────────────────
 
-function HistorySessionCard({ session, unread, onClick }: { session: SessionState; unread: boolean; onClick: () => void }) {
+function HistorySessionCard({ session, unread, tip, taskChip, onClick }: { session: SessionState; unread: boolean; tip: string | null; taskChip: ReactNode; onClick: () => void }) {
   const tagColor = usePrimaryTagColor(session);
   return (
     <button
@@ -510,9 +529,10 @@ function HistorySessionCard({ session, unread, onClick }: { session: SessionStat
           <h3 className="text-sm text-gray-300 truncate group-hover:text-white">
             {session.config.name}
           </h3>
-          {session.summary && <SummaryTooltip summary={session.summary} />}
+          {tip && <SummaryTooltip summary={tip} />}
           {unread && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="Unread messages" />}
           <SessionTagChips session={session} />
+          {taskChip}
         </div>
         <div className="text-xs text-gray-600 truncate">{session.config.cwd}</div>
       </div>

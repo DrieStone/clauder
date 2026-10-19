@@ -67,25 +67,15 @@ body {
   animation: progress 1.8s ease-in-out infinite;
 }
 
-/* Responsive grids: 1 col below 1000px, 2 cols above.
-   minmax(0, 1fr) — not bare 1fr — because a bare 1fr track's automatic minimum size is based
-   on its content's min-content width. A long unbroken string in an old session's cwd path can
-   then force the track (and the whole page) wider than the viewport, causing horizontal
-   scroll. minmax(0, 1fr) caps the track's minimum at 0 so `truncate` inside it actually works. */
+/* Card grids: as many columns as fit, each card at least 300px wide (history rows 260px): one on
+   a phone, two on a small window, three on a laptop, four or more on a wide screen.
+   min(100%, …) keeps a lone column from overflowing a screen narrower than that. The track's
+   minimum is a length, never `auto` (what a bare 1fr has), so a long unbroken cwd path can't
+   size a track, and the page, past the viewport; `truncate` inside the cards still works. */
 .active-grid {
-  grid-template-columns: minmax(0, 1fr);
-}
-@media (min-width: 1000px) {
-  .active-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
 }
 
 .history-grid {
-  grid-template-columns: minmax(0, 1fr);
-}
-@media (min-width: 1000px) {
-  .history-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
 }

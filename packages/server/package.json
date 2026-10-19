@@ -9,7 +9,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.284",
+    "@anthropic-ai/claude-code": "2.1.286",
     "@clauder/shared": "*",
     "compression": "^1.8.2",
     "express": "^4.21.0",

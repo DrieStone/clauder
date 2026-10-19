@@ -115,8 +115,9 @@ function CostTable({ title, w }: { title: string; w: CostSummaryWindow | undefin
  *  Exact percentages live in the tooltip and the click-open breakdown. Falls back to the
  *  cost-proxy countdown only when no real event has ever been seen. */
 export function RateLimitBar() {
-  const { state } = useSessions();
+  const { state, openApiCredits } = useSessions();
   const rateLimit = state.rateLimit;
+  const api = state.apiCredits;
   const [, setTick] = useState(0);
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -133,7 +134,7 @@ export function RateLimitBar() {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') { e.preventDefault(); setOpen(false); }
     };
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -192,6 +193,22 @@ export function RateLimitBar() {
             <div className="border-t border-gray-800 my-2" />
             <CostTable title="Last 24h" w={rateLimit.costSummary?.last24h} />
             <CostTable title="Last 7d" w={rateLimit.costSummary?.last7d} />
+            {api && (
+              <>
+                <div className="border-t border-gray-800 my-2" />
+                <button
+                  onClick={() => { setOpen(false); openApiCredits(); }}
+                  className="w-full flex items-center gap-2 text-left hover:bg-gray-800/60 rounded px-1 py-1 -mx-1"
+                  title="API credits: keep important sessions working on your API credit when the subscription is out"
+                >
+                  <span>💳</span>
+                  <span className="flex-1 text-gray-300">
+                    API credits {api.settings.enabled ? (api.activeSessionIds.length ? <span className="text-amber-300">· in use</span> : '· on') : <span className="text-gray-500">· off</span>}
+                  </span>
+                  <span className="text-gray-400 tabular-nums">${api.monthSpentUsd.toFixed(2)} / ${api.settings.monthlyBudgetUsd}</span>
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

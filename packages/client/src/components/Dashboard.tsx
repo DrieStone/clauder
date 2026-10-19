@@ -1,12 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type DragEvent } from 'react';
+import type { SessionState, SessionFolder } from '@clauder/shared';
 import { useSessions } from '../context/SessionContext';
-import { SessionCard } from './SessionCard';
+import { SessionCard, type CardTier } from './SessionCard';
 import { SessionConfigForm } from './SessionConfig';
 import { SessionBrowser } from './SessionBrowser';
 import { PauseControls } from './PauseBar';
 import { SchedulerModal } from './SchedulerModal';
 import { NotificationToggle } from './NotificationToggle';
 import { TagFilter } from './Tags';
+import { FolderGroup, FolderEditor, useOpenFolders, byFolderName, SESSION_DRAG_TYPE } from './Folders';
+import { whereItStands, isCurrent } from './StatusNote';
+import { tasksByMain, projectActivity } from '../lib/projects';
+
+/** Card dragging (into and out of folders) needs a mouse; on a phone, folders are set from the
+ *  session header or the folder dialog instead. */
+const CAN_DRAG = typeof window !== 'undefined' && !!window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
 
 /** Admin actions menu — currently just "Restart Server". Tucked behind a gear icon (not a
  *  prominent button) since it interrupts every active session; confirms before firing. */
@@ -82,10 +90,16 @@ function classifySession(s: { lastActiveAt: string; status: string }, now: numbe
 }
 
 export function Dashboard() {
-  const { state, createSession, setActiveSession, setShowDiscovery, logEvent, openSearch, isUnread } = useSessions();
+  const { state, createSession, setActiveSession, setShowDiscovery, logEvent, openSearch, isUnread, moveToFolder, openScratch } = useSessions();
   const [showNewSession, setShowNewSession] = useState(false);
   const [showScheduler, setShowScheduler] = useState(false);
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
+  const [openFolders, toggleFolder] = useOpenFolders();
+  const [folderEditor, setFolderEditor] = useState<SessionFolder | 'new' | null>(null);
+  /** The session card being dragged, and whether it's over the main list (to leave its folder). */
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overMainList, setOverMainList] = useState(false);
+  const dragStartTimer = useRef<number | null>(null);
   const [, setTick] = useState(0);
 
   // Re-render every 30s so tier classification and "X ago" labels stay fresh
@@ -96,11 +110,18 @@ export function Dashboard() {
 
   // Scratch session is treated as a normal session card in the Active tier;
   // its visual distinction (amber border + badge) is handled in SessionCard.
-  const sessions = Array.from(state.sessions.values());
+  // One card per project (server/src/project.ts): a project's tasks show only on its main
+  // session's card, which is placed by the project as a whole — working or needing you if any of
+  // its sessions is, and as recent as the most recent.
+  const all = Array.from(state.sessions.values());
+  const taskMap = tasksByMain(all);
+  const sessions = all.filter(s => !s.config.mainSessionId);
   const now = Date.now();
+  const activity = new Map(sessions.map(s => [s.id, projectActivity(s, taskMap.get(s.id) ?? [])]));
+  const act = (s: SessionState) => activity.get(s.id) ?? s;
 
   const byRecent = (a: typeof sessions[0], b: typeof sessions[0]) =>
-    new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime();
+    new Date(act(b).lastActiveAt).getTime() - new Date(act(a).lastActiveAt).getTime();
 
   const byName = (a: typeof sessions[0], b: typeof sessions[0]) =>
     a.config.name.localeCompare(b.config.name);
@@ -108,8 +129,8 @@ export function Dashboard() {
   // Active sessions: "needs you" sessions float to the top (waitingFor set), then alphabetical.
   // Scratch is always shown in Active regardless of its lastActiveAt age.
   const byNeedsYouThenName = (a: typeof sessions[0], b: typeof sessions[0]) => {
-    const aNeeds = a.waitingFor ? 0 : 1;
-    const bNeeds = b.waitingFor ? 0 : 1;
+    const aNeeds = act(a).waitingFor ? 0 : 1;
+    const bNeeds = act(b).waitingFor ? 0 : 1;
     if (aNeeds !== bNeeds) return aNeeds - bNeeds;
     return a.config.name.localeCompare(b.config.name);
   };
@@ -118,9 +139,85 @@ export function Dashboard() {
   const matchesTags = (s: typeof sessions[0]) =>
     tagFilter.size === 0 || (s.config.tags ?? []).some(t => tagFilter.has(t));
   const visible = sessions.filter(matchesTags);
-  const hotSessions = visible.filter(s => s.config.isScratch || classifySession(s, now) === 'hot' || !!s.waitingFor).sort(byNeedsYouThenName);
-  const warmSessions = visible.filter(s => !s.config.isScratch && !s.waitingFor && classifySession(s, now) === 'warm').sort(byRecent);
-  const historySessions = visible.filter(s => !s.config.isScratch && !s.waitingFor && classifySession(s, now) === 'history').sort(byRecent);
+
+  // A session in a folder shows only inside it; a closed folder's header still names any that
+  // need you, are working, or have unread messages.
+  const folderOf = new Map<string, string>();
+  for (const f of state.folders) for (const id of f.sessionIds) if (!folderOf.has(id)) folderOf.set(id, f.id);
+  const loose = visible.filter(s => !folderOf.has(s.id));
+
+  const hotSessions = loose.filter(s => s.config.isScratch || classifySession(act(s), now) === 'hot' || !!act(s).waitingFor).sort(byNeedsYouThenName);
+  const warmSessions = loose.filter(s => !s.config.isScratch && !act(s).waitingFor && classifySession(act(s), now) === 'warm').sort(byRecent);
+  const historySessions = loose.filter(s => !s.config.isScratch && !act(s).waitingFor && classifySession(act(s), now) === 'history').sort(byRecent);
+
+  // Inside a folder, the same split without the headings: recent and waiting sessions as cards
+  // (needs-you first, then by name, like Active), older ones as rows (newest first, like History).
+  // While a tag filter is on, folders open and show only matches; ones with none are hidden.
+  const filtering = tagFilter.size > 0;
+  const isOld = (s: SessionState) => !act(s).waitingFor && classifySession(act(s), now) === 'history';
+  const folderGroups = [...state.folders].sort(byFolderName).map(folder => {
+    const members = visible.filter(s => folderOf.get(s.id) === folder.id);
+    return {
+      folder,
+      recent: members.filter(s => !isOld(s)).sort(byNeedsYouThenName),
+      older: members.filter(isOld).sort(byRecent),
+    };
+  }).filter(g => !filtering || g.recent.length + g.older.length > 0);
+
+  // Drag a card onto a folder to move it in, or from a folder onto the main list to take it out.
+  const draggingFromFolder = !!draggingId && folderOf.has(draggingId);
+  const endDrag = () => {
+    if (dragStartTimer.current !== null) { clearTimeout(dragStartTimer.current); dragStartTimer.current = null; }
+    setDraggingId(null);
+    setOverMainList(false);
+  };
+  // A dormant project's ⓘ previews where it stands, from its status note.
+  const noteFor = (s: SessionState) => {
+    const r = state.statusReports.get(s.id);
+    return r && isCurrent(r, s.lastActiveAt) ? whereItStands(r.text) || undefined : undefined;
+  };
+  const renderCard = (session: SessionState, tier: CardTier) => (
+    <div
+      key={session.id}
+      className="grid grid-cols-1 min-w-0"
+      draggable={CAN_DRAG}
+      onDragStart={CAN_DRAG ? (e) => {
+        e.dataTransfer.setData(SESSION_DRAG_TYPE, session.id);
+        e.dataTransfer.effectAllowed = 'move';
+        // Re-render after the drag has begun: Chrome can drop a drag whose page changes during dragstart.
+        dragStartTimer.current = window.setTimeout(() => { dragStartTimer.current = null; setDraggingId(session.id); }, 0);
+      } : undefined}
+      onDragEnd={CAN_DRAG ? endDrag : undefined}
+    >
+      <SessionCard
+        session={session}
+        tier={tier}
+        unread={isUnread(session)}
+        onOpen={session.config.isScratch ? openScratch : setActiveSession}
+        statusNote={noteFor(session)}
+        tasks={taskMap.get(session.id)?.length}
+        tasksWorking={taskMap.get(session.id)?.filter(t => t.status === 'working').length}
+        tasksNeedYou={taskMap.get(session.id)?.filter(t => !!t.waitingFor).length}
+      />
+    </div>
+  );
+  const mainListDrop = {
+    onDragOver: (e: DragEvent) => {
+      if (!draggingFromFolder) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setOverMainList(true);
+    },
+    onDragLeave: (e: DragEvent<HTMLDivElement>) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOverMainList(false);
+    },
+    onDrop: (e: DragEvent) => {
+      if (!draggingFromFolder || !draggingId) return;
+      e.preventDefault();
+      moveToFolder(draggingId, null);
+      endDrag();
+    },
+  };
 
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden">
@@ -171,17 +268,28 @@ export function Dashboard() {
           </div>
         </div>
 
-        {/* Tag filter bar — renders nothing when no tags exist */}
-        <div className="mb-4 -mt-2">
-          <TagFilter
-            selected={tagFilter}
-            onToggle={(id) => setTagFilter(prev => {
-              const next = new Set(prev);
-              next.has(id) ? next.delete(id) : next.add(id);
-              return next;
-            })}
-            onClear={() => setTagFilter(new Set())}
-          />
+        {/* Tag filter bar (renders nothing when no tags exist), and New folder */}
+        <div className="mb-4 -mt-2 flex items-start gap-2">
+          <div className="flex-1 min-w-0">
+            <TagFilter
+              selected={tagFilter}
+              onToggle={(id) => setTagFilter(prev => {
+                const next = new Set(prev);
+                next.has(id) ? next.delete(id) : next.add(id);
+                return next;
+              })}
+              onClear={() => setTagFilter(new Set())}
+            />
+          </div>
+          {sessions.length > 0 && (
+            <button
+              onClick={() => { logEvent('folder_editor_open', { isNew: true }); setFolderEditor('new'); }}
+              className="shrink-0 text-[11px] text-gray-500 hover:text-gray-300 border border-gray-800 hover:border-gray-600 rounded px-2 py-1 sm:py-0.5 transition-colors"
+              title="Group sessions into a folder on this page"
+            >
+              📁 New folder
+            </button>
+          )}
         </div>
 
         {sessions.length === 0 ? (
@@ -197,66 +305,84 @@ export function Dashboard() {
           </div>
         ) : (
           <div className="space-y-8">
-            {/* Active: compact cards sorted alphabetically */}
-            {hotSessions.length > 0 && (
+            {/* Folders: closed by default; open ones show their sessions like the main list */}
+            {folderGroups.length > 0 && (
               <section>
                 <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
-                  Active
+                  Folders
+                  {draggingId && (
+                    <span className="ml-2 normal-case tracking-normal text-blue-400">
+                      {draggingFromFolder ? 'Drop on another folder, or on the list below to take it out' : 'Drop on a folder to move it in'}
+                    </span>
+                  )}
                 </h2>
-                <div className="grid grid-cols-1 active-grid gap-3">
-                  {hotSessions.map((session) => (
-                    <SessionCard
-                      key={session.id}
-                      session={session}
-                      tier="warm"
-                      unread={isUnread(session)}
-                      onOpen={setActiveSession}
+                <div className="space-y-2">
+                  {folderGroups.map(({ folder, recent, older }) => (
+                    <FolderGroup
+                      key={folder.id}
+                      folder={folder}
+                      recent={recent}
+                      older={older}
+                      open={filtering || openFolders.has(folder.id)}
+                      onToggle={() => toggleFolder(folder.id)}
+                      onEdit={() => { logEvent('folder_editor_open', { isNew: false }); setFolderEditor(folder); }}
+                      onOpenSession={setActiveSession}
+                      isUnread={isUnread}
+                      activityOf={(s) => ({ ...act(s), unread: [s, ...(taskMap.get(s.id) ?? [])].some(isUnread) })}
+                      renderCard={renderCard}
+                      draggingId={draggingId}
+                      onDropSession={(folderId) => { if (draggingId) moveToFolder(draggingId, folderId); endDrag(); }}
                     />
                   ))}
                 </div>
               </section>
             )}
 
-            {/* Warm: 1-36 hours. Large card, no chat. Responsive 1/2 col at 1000px. */}
-            {warmSessions.length > 0 && (
-              <section>
-                <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
-                  Recent
-                </h2>
-                <div className="grid grid-cols-1 active-grid gap-4">
-                  {warmSessions.map((session) => (
-                    <SessionCard
-                      key={session.id}
-                      session={session}
-                      tier="warm"
-                      unread={isUnread(session)}
-                      onOpen={setActiveSession}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
+            <div
+              {...mainListDrop}
+              className={`space-y-8 rounded-xl ${draggingFromFolder ? 'min-h-16' : ''} ${overMainList ? 'outline-dashed outline-2 outline-offset-4 outline-blue-500/60' : ''}`}
+            >
+              {/* Active: compact cards sorted alphabetically */}
+              {hotSessions.length > 0 && (
+                <section>
+                  <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+                    Active
+                  </h2>
+                  <div className="grid grid-cols-1 active-grid gap-3">
+                    {hotSessions.map((session) => renderCard(session, 'warm'))}
+                  </div>
+                </section>
+              )}
 
-            {/* History: 36+ hours. Minimal rows. 1/2 col at 1000px. */}
-            {historySessions.length > 0 && (
-              <section>
-                <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
-                  History
-                </h2>
-                <div className="grid grid-cols-1 history-grid gap-2">
-                  {historySessions.map((session) => (
-                    <SessionCard
-                      key={session.id}
-                      session={session}
-                      tier="history"
-                      unread={isUnread(session)}
-                      onOpen={setActiveSession}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
+              {/* Warm: 1-36 hours. Large card, no chat. Responsive 1/2 col at 1000px. */}
+              {warmSessions.length > 0 && (
+                <section>
+                  <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+                    Recent
+                  </h2>
+                  <div className="grid grid-cols-1 active-grid gap-3">
+                    {warmSessions.map((session) => renderCard(session, 'warm'))}
+                  </div>
+                </section>
+              )}
+
+              {/* History: 36+ hours. Minimal rows. 1/2 col at 1000px. */}
+              {historySessions.length > 0 && (
+                <section>
+                  <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+                    History
+                  </h2>
+                  <div className="grid grid-cols-1 history-grid gap-2">
+                    {historySessions.map((session) => renderCard(session, 'history'))}
+                  </div>
+                </section>
+              )}
+            </div>
           </div>
+        )}
+
+        {folderEditor && (
+          <FolderEditor folder={folderEditor === 'new' ? null : folderEditor} onClose={() => setFolderEditor(null)} />
         )}
 
         {showNewSession && (

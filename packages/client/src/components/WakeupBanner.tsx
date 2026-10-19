@@ -4,6 +4,9 @@ import type { PendingWakeup } from '@clauder/shared';
 interface WakeupBannerProps {
   wakeup: PendingWakeup;
   onCancel: () => void;
+  /** Present on a session sleeping on the usage limit: carry on now on API credits, or (when they
+   *  aren't set up) open the panel to set them up. */
+  apiCredits?: { ready: boolean; onUse: () => void; onSetup: () => void };
 }
 
 function formatRemaining(ms: number): string {
@@ -14,7 +17,7 @@ function formatRemaining(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export function WakeupBanner({ wakeup, onCancel }: WakeupBannerProps) {
+export function WakeupBanner({ wakeup, onCancel, apiCredits }: WakeupBannerProps) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -39,12 +42,25 @@ export function WakeupBanner({ wakeup, onCancel }: WakeupBannerProps) {
           <span className="text-blue-400 truncate" title={wakeup.reason}>· {wakeup.reason}</span>
         )}
       </div>
-      <button
-        onClick={onCancel}
-        className="px-2.5 py-1 bg-blue-800 hover:bg-blue-700 text-white rounded transition-colors whitespace-nowrap"
-      >
-        Cancel
-      </button>
+      <div className="flex items-center gap-2 shrink-0">
+        {apiCredits && (
+          <button
+            onClick={apiCredits.ready ? apiCredits.onUse : apiCredits.onSetup}
+            className="px-2.5 py-1 bg-amber-700/70 hover:bg-amber-600 text-white rounded transition-colors whitespace-nowrap"
+            title={apiCredits.ready
+              ? 'Carry on now using your API credit, until the subscription is back. Spending is capped in the API credits panel.'
+              : 'Set up API credits to keep working while the subscription is out'}
+          >
+            {apiCredits.ready ? '💳 Use API credits now' : '💳 API credits…'}
+          </button>
+        )}
+        <button
+          onClick={onCancel}
+          className="px-2.5 py-1 bg-blue-800 hover:bg-blue-700 text-white rounded transition-colors whitespace-nowrap"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

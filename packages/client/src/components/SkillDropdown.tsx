@@ -53,6 +53,9 @@ export function SkillDropdown({ skills, highlightedIndex, onSelect, onHover, onC
             {skill.source === 'project' && (
               <span className="text-purple-400 text-[10px] uppercase tracking-wide shrink-0">project</span>
             )}
+            {skill.source === 'clauder' && (
+              <span className="text-sky-400 text-[10px] uppercase tracking-wide shrink-0">clauder</span>
+            )}
             <span className="text-gray-400 truncate">{skill.description}</span>
           </button>
         ))

@@ -8,6 +8,8 @@ export interface OneShotOpts {
   model: string;
   timeoutMs?: number;
   cwd?: string;
+  /** Thinking effort (--effort); the CLI's default when absent. */
+  effort?: string;
 }
 
 /** A headless, non-session Claude CLI call — for cheap out-of-band asks (e.g. search's Haiku
@@ -19,10 +21,11 @@ export interface OneShotOpts {
  *  than crashing it. ANTHROPIC_API_KEY is unset in prod, so this subprocess path is the only
  *  way to get an out-of-band LLM call — see CLAUDE.md. */
 export async function runClaudeOneShot(opts: OneShotOpts): Promise<string> {
-  const { prompt, model, timeoutMs = 45_000, cwd = homedir() } = opts;
+  const { prompt, model, timeoutMs = 45_000, cwd = homedir(), effort } = opts;
 
   const flags = [
     '--model', model,
+    ...(effort ? ['--effort', effort] : []),
     '--permission-mode', 'plan',
     '--no-session-persistence',
     '--disallowed-tools', 'Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit',

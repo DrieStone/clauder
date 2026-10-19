@@ -1,4 +1,4 @@
-import type { SessionConfig, SessionState, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, UIMessage, UiState, ShareLink, MessageAuthor } from './session.js';
+import type { SessionConfig, SessionState, ApiCreditsSettings, ApiCreditsStatus, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, SessionFolder, StatusReport, UIMessage, UiState, ShareLink, MessageAuthor } from './session.js';
 import type { ProjectRun, RunBudget } from './project-run.js';
 
 // Browser -> Server
@@ -51,6 +51,26 @@ export type WsInboundMessage =
   /** Task selector's "New task": park the current task (if it has content), then start a fresh
    *  one with this name on its own starting model/effort. */
   | { type: 'start_task'; sessionId: string; name: string; model?: string; effort?: string }
+  /** Project tasks (server/src/project.ts): a new session in the project's folder, run alongside
+   *  the main session. `mainSessionId` may be any session of the project. `message` starts it. */
+  | { type: 'create_task'; mainSessionId: string; name: string; model?: string; effort?: string; message?: string }
+  /** /task: ask this session's Claude for a handoff on `description`, then start a task with it. */
+  | { type: 'spin_off_task'; sessionId: string; description: string }
+  /** Scratch conversations (server/src/scratch.ts): keep one from expiring; make one a session of
+   *  its own here (it keeps its history); or hand it off, through a note Claude writes, to a new
+   *  project folder or as a task of a project. */
+  | { type: 'set_keep'; sessionId: string; keep: boolean }
+  | { type: 'promote_scratch'; sessionId: string; name: string }
+  | { type: 'scratch_handoff'; sessionId: string; name: string; target: { kind: 'new_project'; folder: string } | { kind: 'task'; projectId: string } }
+  /** API credits (server/src/api-credits.ts): change the settings; let a session use them when the
+   *  subscription is out; or, for a session sleeping on a usage limit, use them now. */
+  | { type: 'set_api_credits'; settings: Partial<ApiCreditsSettings> }
+  | { type: 'set_api_allowed'; sessionId: string; allowed: boolean }
+  /** Which sessions this one may message with <<to_session>> (main session ids; empty = none). */
+  | { type: 'set_can_message'; sessionId: string; ids: string[] }
+  /** Close a task: a summary of its work goes on the project's notes board, then the task is deleted. */
+  | { type: 'close_task'; sessionId: string }
+  | { type: 'api_credits_now'; sessionId: string }
   | { type: 'set_goal'; sessionId: string; goal: { text: string; checkEveryMin?: number; deadlineHours?: number; maxNudges?: number } | null }
   | { type: 'set_notes'; sessionId: string; notes: string | null }
   | { type: 'set_pinned'; sessionId: string; pinned: boolean }
@@ -64,6 +84,14 @@ export type WsInboundMessage =
   | { type: 'create_tag'; label: string; color: string }
   | { type: 'update_tag'; id: string; label?: string; color?: string }
   | { type: 'delete_tag'; id: string }
+  /** Dashboard folders (server/src/folders.ts). update_folder's sessionIds replaces the folder's
+   *  sessions; move_to_folder with folderId null takes a session out of its folder. */
+  | { type: 'create_folder'; name: string; sessionIds?: string[] }
+  | { type: 'update_folder'; id: string; name?: string; sessionIds?: string[] }
+  | { type: 'delete_folder'; id: string }
+  | { type: 'move_to_folder'; sessionId: string; folderId: string | null }
+  /** Write (or rewrite) a session's status note now, whatever its idle time. */
+  | { type: 'generate_status_report'; sessionId: string }
   | { type: 'pin_message'; sessionId: string; messageId: string; pinned: boolean }
   /** Share links (owner only; a guest connection may send only ping, request_history,
    *  send_message and interrupt_session, for its own session). */
@@ -125,11 +153,21 @@ export type WsOutboundMessage =
   | { type: 'goal_updated'; sessionId: string; goal: GoalState | null }
   | { type: 'notes_updated'; sessionId: string; notes: string | null; notesUpdatedAt: string | null }
   | { type: 'pinned_changed'; sessionId: string; pinned: boolean }
+  /** A session's config changed in a way the other messages don't cover (a Scratch conversation
+   *  kept, or made a session of its own). The client replaces the session's config. */
+  | { type: 'config_changed'; sessionId: string; config: SessionConfig }
   /** A session's tag set changed. */
   | { type: 'tags_changed'; sessionId: string; tags: string[] }
   /** Full snapshot of the tag registry (sent on connect and after any tag CRUD). */
   | { type: 'tags_registry'; tags: TagDef[] }
+  /** Every dashboard folder (sent on connect and after any change). Owner connections only. */
+  | { type: 'folders_registry'; folders: SessionFolder[] }
+  /** Every status note, which sessions have one being written, and which last attempt failed
+   *  (sent on connect and after any change). Owner connections only. */
+  | { type: 'status_reports'; reports: StatusReport[]; writing: string[]; failed: string[] }
   | { type: 'ui_state'; state: UiState }
+  /** API credits: settings, key state, spend (sent on connect and after any change). Owners only. */
+  | { type: 'api_credits'; status: ApiCreditsStatus }
   /** Every share link, to owner connections only. `baseUrl` is this Mac on the local network. */
   | { type: 'shares_snapshot'; shares: ShareLink[]; baseUrl: string }
   /** Sent to a guest connection once, on connect: which session it's scoped to and who it is. */

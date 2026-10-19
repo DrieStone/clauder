@@ -11,12 +11,17 @@ import { GitIndicator } from './GitIndicator';
 import { ShareModal } from './ShareModal';
 import { ModelEffortSelector } from './ModelEffortSelector';
 import { TagControl, SessionTagChips, primaryTagColor } from './Tags';
+import { FolderControl } from './Folders';
+import { StatusNotePanel } from './StatusNote';
 import { WakeupBanner } from './WakeupBanner';
 import { WatchPanel } from './WatchPanel';
 import { PlanBanner } from './PlanBanner';
 import { MonitorBanner } from './MonitorBanner';
 import { RateLimitBar } from './RateLimitBar';
-import { TaskSelector } from './TaskSelector';
+import { ProjectTaskBar } from './ProjectTasks';
+import { ScratchBar } from './ScratchBar';
+import { projectIdOf, isTask, tasksByMain, projectActivity } from '../lib/projects';
+import { inScratch, noteScratchSeen } from '../lib/scratch';
 import { RichMarkdown } from './RichMarkdown';
 
 /** Matches raw auth-failure text that reached session.error without being normalized to the
@@ -34,8 +39,11 @@ interface SessionViewProps {
   onDraftChange: (v: string) => void;
 }
 
+/** The session last open in each project (by main session id), so its tab returns you there. */
+const lastInProject = new Map<string, string>();
+
 export function SessionView({ session, allSessions, onBack, onSwitchSession, draft, onDraftChange }: SessionViewProps) {
-  const { sendMessage, interruptSession, resetSession, setModel, setEffort, renameSession, generateSummary, respondToPermission, dequeueMessage, cancelWakeup, respondToPlan, setPinned, setTabClosed, setPinOrder, isUnread, logEvent, stopMonitor, state, openSearch, scrollToMessageId, setScrollToMessageId, requestHistory, refreshSkills } = useSessions();
+  const { sendMessage, interruptSession, resetSession, setModel, setEffort, renameSession, generateSummary, respondToPermission, dequeueMessage, cancelWakeup, respondToPlan, setPinned, setTabClosed, setPinOrder, isUnread, logEvent, stopMonitor, state, openSearch, scrollToMessageId, setScrollToMessageId, requestHistory, refreshSkills, spinOffTask, openScratch, apiCreditsNow, openApiCredits } = useSessions();
   const isWorking = session.status === 'working';
   // SessionView is a single long-lived component instance reused across every session
   // (App.tsx renders it with the active session as a prop, not a `key`, so switching
@@ -72,7 +80,18 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   const [authState, setAuthState] = useState<'idle' | 'waiting'>('idle');
   const [showQuickSchedule, setShowQuickSchedule] = useState(false);
   const [showShare, setShowShare] = useState(false);
-  const shareCount = state.shares.filter(s => s.sessionId === session.id).length;
+  // A project (server/src/project.ts) is shared, tabbed and deleted as a whole, from its main session.
+  const projectId = projectIdOf(session);
+  const projectMain = state.sessions.get(projectId) ?? session;
+  const shareCount = state.shares.filter(s => s.sessionId === projectId).length;
+  useEffect(() => { lastInProject.set(projectId, session.id); }, [projectId, session.id]);
+  // Which Scratch conversation is open here, and when it was last looked at (lib/scratch.ts).
+  const isScratchConversation = !!session.config.scratchConversation;
+  useEffect(() => {
+    if (!isScratchConversation) return;
+    noteScratchSeen(session.id);
+    return () => noteScratchSeen(session.id);
+  }, [session.id, isScratchConversation]);
   // Tab right-click menu, closed tabs, pinned-tab order, and the pinned tab being dragged.
   const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const closedTabs = state.uiState.closedTabs;
@@ -81,10 +100,10 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   useEffect(() => {
     if (!tabMenu) return;
     const close = () => setTabMenu(null);
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
     window.addEventListener('click', close);
-    window.addEventListener('keydown', onKey);
-    return () => { window.removeEventListener('click', close); window.removeEventListener('keydown', onKey); };
+    document.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
   }, [tabMenu]);
 
   // Scroll to and briefly highlight a specific message — set by search's session hits via
@@ -122,6 +141,9 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   // any path that slips an unnormalized auth failure into session.error still gets the
   // re-auth banner instead of a dead-end generic error.
   const authExpired = !!session.error && (session.error === 'AUTH_EXPIRED' || AUTH_ERRORISH_RE.test(session.error));
+
+  // This session's status note (written once it's been idle a while; see StatusNote.tsx).
+  const statusNote = state.statusReports.get(session.id) ?? null;
 
   // Reset auth waiting state when auth is restored (error clears)
   useEffect(() => {
@@ -168,17 +190,23 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   // and anything the user has explicitly pinned, regardless of activity. Scratch is pulled
   // out so it always appears first. Pinned sessions sort ahead of the rest, alphabetically
   // within each group.
+  // One tab per project: a task shows under its main session's tab, which counts as working or
+  // unread when any of the project's sessions is.
   const ONE_HOUR_MS = 60 * 60 * 1000;
   const now = Date.now();
   const scratchSession = allSessions.find(s => s.config.isScratch);
+  const taskMap = tasksByMain(allSessions);
+  const tabActivity = (s: SessionState) => projectActivity(s, taskMap.get(s.id) ?? []);
+  const tabUnreadOf = (s: SessionState) => [s, ...(taskMap.get(s.id) ?? [])].some(x => x.id !== session.id && isUnread(x));
   const sortedSessions = allSessions
     .filter(s => {
-      if (s.config.isScratch) return false;
-      if (s.id === session.id) return true;
+      if (s.config.isScratch || isTask(s)) return false;
+      if (s.id === projectId) return true;
+      const act = tabActivity(s);
       // Closed from the right-click menu: hidden until the session has activity after the close.
       const closedAt = closedTabs[s.id];
-      if (closedAt && new Date(s.lastActiveAt).getTime() <= closedAt && s.status !== 'working') return false;
-      return s.config.pinned || s.status === 'working' || (now - new Date(s.lastActiveAt).getTime()) < ONE_HOUR_MS || isUnread(s);
+      if (closedAt && new Date(act.lastActiveAt).getTime() <= closedAt && act.status !== 'working') return false;
+      return s.config.pinned || act.status === 'working' || (now - new Date(act.lastActiveAt).getTime()) < ONE_HOUR_MS || tabUnreadOf(s);
     })
     .sort((a, b) => {
       const pinDiff = (b.config.pinned ? 1 : 0) - (a.config.pinned ? 1 : 0);
@@ -199,7 +227,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   };
   const closeTab = (id: string) => {
     setTabClosed(id, true);
-    if (id === session.id) {
+    if (id === projectId) {
       const next = sortedSessions.find(s => s.id !== id);
       if (next) onSwitchSession(next.id); else onBack();
     }
@@ -223,16 +251,16 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
         {scratchSession && (
           <button
             key={scratchSession.id}
-            onClick={() => onSwitchSession(scratchSession.id)}
-            title="Scratch (Cmd/Ctrl+Shift+S)"
+            onClick={() => { if (!inScratch(session)) openScratch(); }}
+            title="Scratch (Cmd/Ctrl+Shift+S): quick conversations. After 6 hours away it opens a fresh one."
             className={`px-3 min-h-[44px] text-xs font-medium transition-colors shrink-0 flex items-center gap-1.5 border-b-2 border-r border-r-gray-800 ${
-              scratchSession.id === session.id
+              inScratch(session)
                 ? 'text-amber-300 border-b-amber-400'
                 : 'text-amber-500 hover:text-amber-300 border-b-transparent'
             }`}
           >
             <span>📝</span>
-            {scratchSession.status === 'working' && (
+            {tabActivity(scratchSession).status === 'working' && (
               <span className="flex gap-0.5 shrink-0">
                 <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:0ms]" />
                 <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:150ms]" />
@@ -243,12 +271,19 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           </button>
         )}
         {sortedSessions.map((s) => {
-          const tabUnread = s.id !== session.id && isUnread(s);
+          const tabUnread = tabUnreadOf(s);
+          const tabWorking = tabActivity(s).status === 'working';
           const pinned = !!s.config.pinned;
           const tabSched = scheduledFor(s.id);
           const tabWakeup = !!s.pendingWakeup;
           const tabColor = primaryTagColor(s, state.tags);
-          const isActiveTab = s.id === session.id;
+          const isActiveTab = s.id === projectId;
+          const taskCount = taskMap.get(s.id)?.length ?? 0;
+          // Back to the session you were last in on this project, if it's still there.
+          const openTab = () => {
+            const last = lastInProject.get(s.id);
+            onSwitchSession(last && allSessions.some(x => x.id === last && projectIdOf(x) === s.id) ? last : s.id);
+          };
           const schedTitle = [
             tabSched > 0 ? `${tabSched} scheduled task${tabSched !== 1 ? 's' : ''}` : '',
             tabWakeup ? 'auto-wakeup pending' : '',
@@ -258,8 +293,8 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
               key={s.id}
               role="button"
               tabIndex={0}
-              onClick={() => onSwitchSession(s.id)}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSwitchSession(s.id); }}
+              onClick={openTab}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openTab(); }}
               onContextMenu={(e) => { e.preventDefault(); setTabMenu({ id: s.id, x: e.clientX, y: e.clientY }); }}
               draggable={pinned}
               onDragStart={(e) => { setDragId(s.id); e.dataTransfer.effectAllowed = 'move'; }}
@@ -267,7 +302,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
               onDrop={(e) => { e.preventDefault(); if (dragId) movePinned(dragId, s.id); setDragId(null); }}
               onDragEnd={() => setDragId(null)}
               className={`${dragId === s.id ? 'opacity-40 ' : ''}group relative px-3 min-h-[44px] text-xs font-medium transition-colors shrink-0 flex items-center gap-1.5 border-b-2 cursor-pointer ${
-                s.id === session.id
+                isActiveTab
                   ? 'text-blue-400 border-blue-400'
                   : 'text-gray-500 hover:text-gray-300 border-transparent'
               }`}
@@ -279,7 +314,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
                   style={{ backgroundColor: tabColor, opacity: isActiveTab ? 1 : 0.55 }}
                 />
               )}
-              {s.status === 'working' && (
+              {tabWorking && (
                 <span className="flex gap-0.5 shrink-0">
                   <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:0ms]" />
                   <span className="w-1 h-1 rounded-full bg-amber-400 animate-bounce [animation-delay:150ms]" />
@@ -310,6 +345,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
                 </button>
               )}
               <span className="truncate max-w-[120px]">{s.config.name}</span>
+              {taskCount > 0 && <span className="shrink-0 text-[10px] text-gray-500" title={`${taskCount} task${taskCount !== 1 ? 's' : ''}`}>+{taskCount}</span>}
               <button
                 onClick={(e) => { e.stopPropagation(); togglePin(s.id, !pinned); }}
                 className={`shrink-0 transition-opacity ${pinned ? 'opacity-100 text-amber-400' : 'opacity-40 group-hover:opacity-70 hover:!opacity-100 text-gray-400'}`}
@@ -355,6 +391,17 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           groups, reflowed with order-*. sm+: a single row, as before. */}
       <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1.5 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 border-b border-gray-800 bg-gray-900/50 shrink-0">
         <div className="order-1 flex-1 sm:flex-initial sm:max-w-[40%] min-w-0 flex items-center gap-2">
+          {isScratchConversation ? (
+            <span className="text-sm text-amber-500/80 shrink-0">Scratch ›</span>
+          ) : isTask(session) && (
+            <button
+              onClick={() => onSwitchSession(projectId)}
+              className="text-sm text-gray-500 hover:text-gray-300 truncate min-w-0 max-w-[40%] shrink"
+              title="Go to the project's main session"
+            >
+              {projectMain.config.name} ›
+            </button>
+          )}
           {isRenaming ? (
             <input
               ref={renameInputRef}
@@ -377,6 +424,15 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             </h2>
           )}
           <StatusBadge status={session.status} waitingFor={session.waitingFor} compact />
+          {state.apiCredits?.activeSessionIds.includes(session.id) && (
+            <button
+              onClick={openApiCredits}
+              className="text-[10px] text-amber-300 bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 rounded shrink-0"
+              title="This turn is running on your API credits, not your subscription. Click for the budget."
+            >
+              💳 API
+            </button>
+          )}
           {session.origin === 'vscode' && (
             <span className="text-[10px] text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded shrink-0">VS Code</span>
           )}
@@ -415,6 +471,8 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             }}
           />
           <GoalControl session={session} />
+          {/* Folders hold projects: a task goes wherever its main session does. */}
+          {!isTask(session) && <FolderControl session={session} />}
           <TagControl session={session} />
           <SessionTagChips session={session} />
           <GitIndicator sessionId={session.id} working={session.status === 'working'} />
@@ -549,6 +607,11 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             <WakeupBanner
               wakeup={session.pendingWakeup}
               onCancel={() => cancelWakeup(session.id)}
+              apiCredits={session.pendingWakeup.toolUseId === 'rate-limit-auto-resume' && state.apiCredits ? {
+                ready: state.apiCredits.settings.enabled && state.apiCredits.keyState === 'ok' && !state.apiCredits.blockedUntil,
+                onUse: () => apiCreditsNow(session.id),
+                onSetup: openApiCredits,
+              } : undefined}
             />
           )}
 
@@ -624,10 +687,8 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             </div>
           )}
 
-          <TaskSelector session={session} isWorking={isWorking} />
-
           {/* Messages */}
-          <MessageList key={session.activeThreadId} messages={session.messages} sessionId={session.id} />
+          <MessageList key={session.activeThreadId} messages={session.messages} sessionId={session.id} statusReport={statusNote && statusNote.threadId === session.activeThreadId ? statusNote : null} />
 
           {/* Queued messages */}
           {session.queuedMessages.length > 0 && (
@@ -653,9 +714,15 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             </div>
           )}
 
+          {/* The project's tasks, or Scratch's conversations: switch, or start one */}
+          {inScratch(session)
+            ? <ScratchBar session={session} onSwitchSession={onSwitchSession} />
+            : <ProjectTaskBar session={session} onSwitchSession={onSwitchSession} />}
+
           {/* Input */}
           <PromptInput
             sessionId={session.id}
+            onTaskCommand={inScratch(session) ? undefined : (description) => spinOffTask(session.id, description)}
             onSend={(msg, images, planMode, files, model, effort) => sendMessage(session.id, msg, images, planMode, files, model, effort)}
             onInterrupt={() => interruptSession(session.id)}
             isWorking={isWorking}
@@ -717,10 +784,17 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
               </button>
             </div>
           )}
+          <StatusNotePanel
+            sessionId={session.id}
+            report={statusNote}
+            lastActiveAt={session.lastActiveAt}
+            writing={state.statusWriting.has(session.id)}
+            failed={state.statusFailed.has(session.id)}
+          />
         </div>
       )}
 
-      {showShare && <ShareModal session={session} onClose={() => setShowShare(false)} />}
+      {showShare && <ShareModal session={projectMain} onClose={() => setShowShare(false)} />}
       {showQuickSchedule && (
         <QuickScheduleModal
           sessionId={session.id}
@@ -1033,7 +1107,9 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
  *  (permission mode, compact, destroy/clear) so the header can stay focused on model, goal,
  *  schedule, and the reset countdown. A gear button toggles a click-outside-dismissable popover. */
 function SessionSettingsMenu({ session, contextPct, onBack, onShare }: { session: SessionState; contextPct: number | null; onBack: () => void; onShare: () => void }) {
-  const { compactSession, destroySession, clearSession, setPermissionMode, updateCwd, logEvent } = useSessions();
+  const { compactSession, destroySession, clearSession, setPermissionMode, updateCwd, logEvent, state, setApiAllowed, openApiCredits, setCanMessage, closeTask } = useSessions();
+  const [showReach, setShowReach] = useState(false);
+  const taskCount = isTask(session) ? 0 : [...state.sessions.values()].filter(x => x.config.mainSessionId === session.id).length;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const [isEditingCwd, setIsEditingCwd] = useState(false);
@@ -1109,6 +1185,56 @@ function SessionSettingsMenu({ session, contextPct, onBack, onShare }: { session
               onChange={(mode) => setPermissionMode(session.id, mode)}
             />
           </div>
+          {!session.config.isScratch && !session.config.scratchConversation && (() => {
+            // <<to_session>>: which other projects this one may message when you ask it to.
+            const main = state.sessions.get(session.config.mainSessionId ?? session.id) ?? session;
+            const allowed = new Set(main.config.canMessage ?? []);
+            const others = [...state.sessions.values()]
+              .filter(s => s.id !== main.id && !s.config.mainSessionId && !s.config.isScratch)
+              .sort((a, b) => (allowed.has(b.id) ? 1 : 0) - (allowed.has(a.id) ? 1 : 0) || a.config.name.localeCompare(b.config.name));
+            const toggle = (id: string) => {
+              const next = new Set(allowed);
+              if (next.has(id)) next.delete(id); else next.add(id);
+              setCanMessage(main.id, [...next]);
+            };
+            return (
+              <div className="px-1 pb-1">
+                <button
+                  onClick={() => setShowReach(v => !v)}
+                  className="w-full text-left text-xs text-gray-300 hover:text-gray-100"
+                  title="Sessions this one may message when you ask it to (<<to_session>>). Anyone it messages can answer back."
+                >
+                  📨 Can message… <span className="text-gray-500">{allowed.size ? `${allowed.size} session${allowed.size === 1 ? '' : 's'}` : 'none'}</span> {showReach ? '▾' : '▸'}
+                </button>
+                {showReach && (
+                  <div className="mt-1 max-h-48 overflow-y-auto space-y-0.5 pl-1">
+                    {others.map(s => (
+                      <label key={s.id} className="flex items-center gap-2 text-[11px] text-gray-300 cursor-pointer">
+                        <input type="checkbox" checked={allowed.has(s.id)} onChange={() => toggle(s.id)} className="accent-blue-500" />
+                        <span className="truncate">{s.config.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          {!session.config.isScratch && state.apiCredits && (
+            <div className="px-1 pb-1">
+              <label className="flex items-start gap-2 cursor-pointer" title="When the subscription runs out of usage, keep this session working on your API credits instead of sleeping until it resets. Budgets are in the API credits panel.">
+                <input
+                  type="checkbox"
+                  checked={!!session.config.apiCredits}
+                  onChange={(e) => setApiAllowed(session.id, e.target.checked)}
+                  className="mt-0.5 accent-amber-500"
+                />
+                <span className="text-xs text-gray-300">💳 Use API credits when usage runs out</span>
+              </label>
+              <button onClick={() => { setOpen(false); openApiCredits(); }} className="ml-5 text-[11px] text-gray-500 hover:text-gray-300">
+                {state.apiCredits.settings.enabled ? `$${state.apiCredits.monthSpentUsd.toFixed(2)} of $${state.apiCredits.settings.monthlyBudgetUsd} this month · manage` : 'Off in the panel · set up'}
+              </button>
+            </div>
+          )}
           {contextPct !== null && (
             <button
               onClick={() => { compactSession(session.id); setOpen(false); }}
@@ -1130,6 +1256,18 @@ function SessionSettingsMenu({ session, contextPct, onBack, onShare }: { session
             >
               Clear conversation
             </button>
+          ) : session.config.scratchConversation ? (
+            <button
+              onClick={() => {
+                if (confirm(`Delete the Scratch conversation "${session.config.name}"? This can't be undone.`)) {
+                  destroySession(session.id);
+                  onBack();
+                }
+              }}
+              className="w-full text-left px-2 py-2 rounded text-xs text-red-300 hover:bg-gray-700/60 transition-colors"
+            >
+              Delete conversation
+            </button>
           ) : (
             <>
               <button
@@ -1138,22 +1276,38 @@ function SessionSettingsMenu({ session, contextPct, onBack, onShare }: { session
               >
                 🔗 Share with someone…
               </button>
-              <button
-                onClick={() => { setShowArchiveConfirm(true); setOpen(false); }}
-                className="w-full text-left px-2 py-2 rounded text-xs text-amber-300 hover:bg-gray-700/60 transition-colors"
-              >
-                📦 Archive project…
-              </button>
+              {/* A project is archived whole, from its main session. */}
+              {!isTask(session) && (
+                <button
+                  onClick={() => { setShowArchiveConfirm(true); setOpen(false); }}
+                  className="w-full text-left px-2 py-2 rounded text-xs text-amber-300 hover:bg-gray-700/60 transition-colors"
+                >
+                  📦 Archive project…
+                </button>
+              )}
               <button
                 onClick={() => {
-                  if (confirm('Destroy this session?')) {
+                  if (isTask(session)) {
+                    if (session.status === 'working') { alert('This task is working. Stop it or let it finish, then close it.'); return; }
+                    if (confirm(`Close the task "${session.config.name}"?\n\nA summary of its work is written and kept on the project's notes board and task list. Its conversation is deleted; changes it made to files stay.`)) {
+                      closeTask(session.id);
+                      setOpen(false);
+                    }
+                    return;
+                  }
+                  const question = isTask(session)
+                    ? ''
+                    : taskCount > 0
+                      ? `Destroy this session and its ${taskCount} task${taskCount !== 1 ? 's' : ''}?`
+                      : 'Destroy this session?';
+                  if (confirm(question)) {
                     destroySession(session.id);
                     onBack();
                   }
                 }}
                 className="w-full text-left px-2 py-2 rounded text-xs text-red-300 hover:bg-gray-700/60 transition-colors"
               >
-                Destroy session
+                {isTask(session) ? 'Close task…' : 'Destroy session'}
               </button>
             </>
           )}

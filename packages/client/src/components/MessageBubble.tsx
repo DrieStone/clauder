@@ -120,7 +120,10 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
   const isUser = message.role === 'user';
   // On a shared session, say who wrote each user message: a guest by name (and in teal); on the
   // guest's own page, anything unattributed came from the owner.
-  const authorLabel = isUser ? (message.author?.name ?? (guestMode ? 'Owner' : null)) : null;
+  // Who wrote it, when not the owner: a guest, or another session of the project (a task checking
+  // in, or the main session answering), shown in its own color.
+  const fromSession = isUser && !!message.author?.sessionId;
+  const authorLabel = isUser ? (message.author ? `${fromSession ? '↪ From ' : ''}${message.author.name}` : (guestMode ? 'Owner' : null)) : null;
   const candidates = !isUser && message.content ? extractCandidates(message.content) : [];
   const pinned = !!message.pinned;
   const hasText = !!message.content?.trim();
@@ -147,7 +150,7 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
       <div
         className={`max-w-[85%] min-w-0 rounded-lg ${toolOnly ? 'px-2 py-1.5' : 'px-3 py-2'} text-sm break-words overflow-hidden ${
           isUser
-            ? message.author ? 'bg-teal-700 text-white' : 'bg-blue-600 text-white'
+            ? fromSession ? 'bg-violet-800 text-white' : message.author ? 'bg-teal-700 text-white' : 'bg-blue-600 text-white'
             : pinned
               ? 'bg-gray-800 text-gray-100 border border-amber-600/60'
               : 'bg-gray-800 text-gray-100 border border-gray-700'

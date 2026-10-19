@@ -14,6 +14,8 @@ const RETIRED_MODELS: Record<string, string> = {
   // Sonnet
   'claude-sonnet-5': 'claude-sonnet-5-5',   // superseded: same per-token price, faster
   'claude-sonnet-4-6': 'claude-sonnet-5-5',
+  'claude-sonnet-4-5-20250929': 'claude-sonnet-5-5', // deprecated Sep 30, 2026; retires Nov 30, 2026
+  'claude-sonnet-4-5': 'claude-sonnet-5-5',          // its alias
   // Fable
   'claude-fable-5': 'claude-fable-5-1',
   // Bare aliases. The picker deals only in pinned IDs — an alias silently follows whatever

@@ -12,6 +12,9 @@ import { onRateLimitUpdate } from './rate-limits.js';
 import { TriggerManager } from './triggers.js';
 import { TagManager } from './tags.js';
 import { UiStateManager } from './ui-state.js';
+import { FolderManager } from './folders.js';
+import { StatusReportManager } from './status-reports.js';
+import { ApiCredits } from './api-credits.js';
 import { initAuth } from './auth.js';
 import { ShareManager, shareBaseUrl, guestNote, revokedGuestNote } from './shares.js';
 import { ProjectRunner } from './project-runner.js';
@@ -50,6 +53,12 @@ let triggerManager: TriggerManager;
 let tagManager: TagManager;
 // Cross-device view state — read status, closed tabs, pinned-tab order. Wired up post-WS.
 let uiStateManager: UiStateManager;
+// Dashboard folders — named groups of sessions. Wired up post-WS.
+let folderManager: FolderManager;
+// Status notes for projects that have gone quiet. Wired up post-WS.
+let statusReports: StatusReportManager;
+// API credits — keep working on the owner's API credit when the subscription is out. Wired up post-WS.
+let apiCredits: ApiCredits;
 // Share links — one session per named guest on the local network. Wired up post-WS.
 let shareManager: ShareManager;
 // Project Runner — drives overnight autonomous runs. Wired up post-WS.
@@ -66,7 +75,7 @@ const app = createApp(sessionManager, () => triggerManager, () => projectRunner,
 const server = http.createServer(app);
 
 // Set up WebSocket on the same server
-const { broadcast, getClientCount, disconnectShare } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager, () => shareManager);
+const { broadcast, getClientCount, disconnectShare } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager, () => shareManager, () => folderManager, () => statusReports, () => apiCredits);
 broadcastFn = broadcast;
 
 // Tag registry — broadcast the full snapshot to all clients after any CRUD.
@@ -77,6 +86,35 @@ tagManager.load();
 uiStateManager = new UiStateManager((state) => broadcast({ type: 'ui_state', state }), (id) => !!sessionManager.getSession(id));
 uiStateManager.load();
 
+// Dashboard folders — full list to all clients on any change (a guest's connection filters it out).
+// Scratch always shows on its own, and a project's tasks go wherever its main session does.
+folderManager = new FolderManager(
+  (folders) => broadcast({ type: 'folders_registry', folders }),
+  (id) => { const s = sessionManager.getSession(id); return !!s && !s.config.isScratch && !s.config.mainSessionId; },
+);
+folderManager.load();
+sessionManager.onSessionDestroyed((id) => folderManager.removeSession(id));
+
+// Status notes: once a session has been idle STATUS_IDLE_DAYS, an hourly sweep writes a note on
+// where it stands (one cheap one-off Claude call each, never a turn in the session). Owners get the
+// full list after any change; a guest's connection filters it out.
+statusReports = new StatusReportManager({
+  getSession: (id) => sessionManager.getSession(id)?.getState() ?? null,
+  listSessions: () => sessionManager.getAllSessions(),
+  isPaused: () => { const until = sessionManager.getPauseUntil(); return !!until && Date.parse(until) > Date.now(); },
+  broadcast: (reports, writing, failed) => broadcast({ type: 'status_reports', reports, writing, failed }),
+});
+statusReports.load();
+statusReports.start();
+sessionManager.onSessionDestroyed((id) => statusReports.removeSession(id));
+
+// API credits: when the subscription is out of usage, sessions the owner has allowed carry on on
+// the API credit instead of sleeping, within a monthly, a daily and a per-turn budget. The key is
+// read from ~/.clauder/api-key; owners get the status after any change.
+apiCredits = new ApiCredits({ onChange: (status) => broadcast({ type: 'api_credits', status }) });
+apiCredits.load();
+sessionManager.setApiCredits(apiCredits);
+
 // Share links. Owners get the full list after any change (a guest's connection filters it out); a
 // revoked link's open connections are dropped at once. Each guest message reaches Claude behind a
 // note naming the guest and the owner's rules for them, and a destroyed session takes its links.
@@ -85,11 +123,15 @@ shareManager = new ShareManager(
   (share) => disconnectShare(share.id),
 );
 shareManager.load();
+// A message from another session of the same project (a task checking in) gets its own note.
 sessionManager.setAuthorDescriber((author) => {
-  const share = shareManager.get(author.shareId);
+  if (author.sessionId) return sessionManager.describeRelay(author);
+  const share = author.shareId ? shareManager.get(author.shareId) : null;
   return share ? guestNote(share) : revokedGuestNote(author.name);
 });
 sessionManager.onSessionDestroyed((id) => shareManager.revokeForSession(id));
+// Messages between projects (<<to_session>>) never involve a project shared with a guest.
+sessionManager.setIsShared((projectId) => shareManager.list().some(s => s.sessionId === projectId));
 
 // Hourly health snapshot — one line so slow leaks and stuck sessions are visible in the log
 // (the server runs for weeks; without this, a session wedged in "working" for two days or
@@ -117,6 +159,7 @@ setTimeout(logHealthSnapshot, 60 * 1000).unref(); // first snapshot shortly afte
 // Broadcast rate limit updates to all clients
 onRateLimitUpdate((rateLimit) => {
   broadcast({ type: 'rate_limit_update', rateLimit });
+  apiCredits?.refresh();
 });
 
 // Initialize triggers (fire messages via sessionManager, broadcast events to clients)
@@ -145,6 +188,8 @@ triggerManager.load();
 sessionManager.setTriggerCreator(({ sessionId, message, description, at }) => {
   triggerManager.create({ sessionId, message, description, schedule: { type: 'once', at }, source: 'scheduled' });
 });
+// A Scratch conversation with a scheduled message still to come doesn't expire.
+sessionManager.setScratchKeepAlive((id) => triggerManager.list().some(t => t.sessionId === id && t.enabled));
 
 // Project Runner — drives overnight autonomous runs. Compose the broadcast so every
 // session event also reaches the runner's supervise loop (it filters to its executors).
@@ -155,6 +200,7 @@ const goalSupervisor = new GoalSupervisor(sessionManager, () => triggerManager, 
 modelPlanRunner = new ModelPlanRunner(sessionManager, broadcast);
 (sessionManager as any).broadcast = (msg: WsOutboundMessage) => {
   broadcast(msg);
+  sessionManager.onEvent(msg);
   projectRunner.onEvent(msg);
   goalSupervisor.onEvent(msg);
   modelPlanRunner.onEvent(msg);
@@ -174,6 +220,8 @@ setInterval(backupSessions, 10 * 60 * 1000).unref();
 
 // Restore sessions from disk now that broadcast is wired
 sessionManager.restoreFromDisk();
+// Scratch conversations untouched for 30 days (unless kept) go, checked hourly.
+sessionManager.startScratchSweep();
 
 // Restore project runs after their executor sessions are back; re-arm resume timers.
 projectRunner.restoreFromDisk();
@@ -192,6 +240,7 @@ setTimeout(() => { goalSupervisor.kickstartActiveGoals(); modelPlanRunner.kickst
       cwd: homedir(),
       model: SCRATCH_MODEL,
       isScratch: true,
+      scratchSplitAt: new Date().toISOString(), // born holding conversations: nothing to split
     });
     console.log('[Clauder] Auto-created scratch session');
   }
@@ -258,6 +307,7 @@ process.on('SIGINT', async () => {
   console.log('\n[Clauder] Shutting down...');
   sessionManager.persistNow();
   uiStateManager?.flush();
+  apiCredits?.saveNow();
   sessionManager.clearSummaryTimers(); // stop pending summaries firing into closed sockets post-shutdown
   try { await sessionManager.terminateAll(); } catch (err) {
     console.error('[Clauder] Error during shutdown cleanup:', err);
@@ -269,6 +319,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   sessionManager.persistNow();
   uiStateManager?.flush();
+  apiCredits?.saveNow();
   sessionManager.clearSummaryTimers(); // stop pending summaries firing into closed sockets post-shutdown
   try { await sessionManager.terminateAll(); } catch (err) {
     console.error('[Clauder] Error during shutdown cleanup:', err);

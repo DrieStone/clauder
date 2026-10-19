@@ -3,9 +3,10 @@ import { Dashboard } from './components/Dashboard';
 import { SessionView } from './components/SessionView';
 import { PauseBar } from './components/PauseBar';
 import { SearchModal } from './components/SearchModal';
+import { ApiCreditsModal } from './components/ApiCreditsModal';
 import { useEffect, useCallback, useRef, useState } from 'react';
 import { onNotificationClick, markRead } from './lib/notifications';
-import { getScratchSession, getNonScratchSessions } from './lib/sessions';
+import { getNonScratchSessions } from './lib/sessions';
 import { tailscaleOrigin } from './lib/hosts';
 
 /** Track the visual viewport: its height AND its offsetTop. Height alone is not enough on
@@ -42,7 +43,7 @@ function useVisualViewport(): { height: number; offsetTop: number } | null {
 }
 
 function AppContent() {
-  const { state, setActiveSession, showSearch, openSearch, closeSearch, markSessionRead } = useSessions();
+  const { state, setActiveSession, showSearch, openSearch, closeSearch, markSessionRead, openScratch, showApiCredits, closeApiCredits } = useSessions();
   const viewport = useVisualViewport();
   const activeSession = state.activeSessionId
     ? state.sessions.get(state.activeSessionId) ?? null
@@ -82,13 +83,14 @@ function AppContent() {
   // Keyboard shortcut: Escape to go back to dashboard; Cmd/Ctrl+Shift+S jumps to scratch
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && state.activeSessionId) {
+      // A popover that closed on this Escape marks it handled (preventDefault): that Escape
+      // shouldn't also leave the session.
+      if (e.key === 'Escape' && state.activeSessionId && !e.defaultPrevented) {
         setActiveSession(null);
       }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
-        const scratch = getScratchSession(state.sessions);
-        if (scratch) setActiveSession(scratch.id);
+        openScratch();
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'k') {
         e.preventDefault();
@@ -103,7 +105,7 @@ function AppContent() {
         }
       }
     },
-    [state.activeSessionId, state.sessions, setActiveSession, openSearch],
+    [state.activeSessionId, state.sessions, setActiveSession, openSearch, openScratch],
   );
 
   useEffect(() => {
@@ -181,6 +183,7 @@ function AppContent() {
       )}
 
       {showSearch && <SearchModal onClose={closeSearch} />}
+      {showApiCredits && <ApiCreditsModal onClose={closeApiCredits} />}
     </div>
   );
 }

@@ -12,7 +12,8 @@ export function getScratchSession(sessions: Map<string, SessionState>): SessionS
 export function getNonScratchSessions(sessions: Map<string, SessionState>): SessionState[] {
   const out: SessionState[] = [];
   for (const s of sessions.values()) {
-    if (!s.config.isScratch) out.push(s);
+    // Not Scratch's conversations or a project's tasks either: those aren't tabs of their own.
+    if (!s.config.isScratch && !s.config.mainSessionId) out.push(s);
   }
   return out;
 }

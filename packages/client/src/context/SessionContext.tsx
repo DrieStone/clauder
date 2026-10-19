@@ -1,6 +1,9 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, UiState, ShareLink, MessageAuthor } from '@clauder/shared';
-import { trimMessages } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, SessionFolder, StatusReport, UiState, ShareLink, MessageAuthor, ApiCreditsStatus, ApiCreditsSettings } from '@clauder/shared';
+import { trimMessages, SCRATCH_NEW_NAME } from '@clauder/shared';
+import { displayName } from '../lib/projects';
+import { getScratchSession } from '../lib/sessions';
+import { scratchConversations, scratchToOpen, hasConversation } from '../lib/scratch';
 import { WsClient } from '../lib/ws-client';
 import { buildWsCandidates, buildGuestWsUrl } from '../lib/hosts';
 import { notify } from '../lib/notifications';
@@ -38,6 +41,15 @@ interface AppState {
   triggers: Map<string, Trigger>;
   /** The tag registry (user-defined colored labels), in registry order. */
   tags: TagDef[];
+  /** Dashboard folders (named groups of sessions), in server order; the dashboard sorts them. */
+  folders: SessionFolder[];
+  /** Status notes for idle projects, by session id, plus which are being written now and which
+   *  sessions' last attempt failed. */
+  statusReports: Map<string, StatusReport>;
+  statusWriting: Set<string>;
+  statusFailed: Set<string>;
+  /** API credits: settings, key state and spend, from the server (owner only). Null until it says. */
+  apiCredits: ApiCreditsStatus | null;
   /** Read status, closed tabs and pinned-tab order. Synced across devices by the server once
    *  `uiSynced`; until then (a server that predates syncing) kept in this browser only. */
   uiState: UiState;
@@ -97,8 +109,12 @@ type Action =
   | { type: 'NOTES_UPDATED'; sessionId: string; notes: string | null; notesUpdatedAt: string | null }
   | { type: 'CWD_CHANGED'; sessionId: string; cwd: string }
   | { type: 'PINNED_CHANGED'; sessionId: string; pinned: boolean }
+  | { type: 'CONFIG_CHANGED'; sessionId: string; config: SessionConfig }
   | { type: 'TAGS_CHANGED'; sessionId: string; tags: string[] }
   | { type: 'TAGS_REGISTRY'; tags: TagDef[] }
+  | { type: 'FOLDERS_REGISTRY'; folders: SessionFolder[] }
+  | { type: 'STATUS_REPORTS'; reports: StatusReport[]; writing: string[]; failed: string[] }
+  | { type: 'API_CREDITS'; status: ApiCreditsStatus }
   | { type: 'UI_STATE'; state: UiState }
   | { type: 'UI_MARK_READ'; sessionId: string; at: string }
   | { type: 'UI_TAB_CLOSED'; sessionId: string; closedAt: number | null }
@@ -443,6 +459,13 @@ function reducer(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'CONFIG_CHANGED': {
+      return {
+        ...state,
+        sessions: updateSession(state.sessions, action.sessionId, (s) => ({ ...s, config: action.config })),
+      };
+    }
+
     case 'TAGS_CHANGED': {
       return {
         ...state,
@@ -456,6 +479,20 @@ function reducer(state: AppState, action: Action): AppState {
     case 'TAGS_REGISTRY': {
       return { ...state, tags: action.tags };
     }
+
+    case 'FOLDERS_REGISTRY':
+      return { ...state, folders: action.folders };
+
+    case 'STATUS_REPORTS':
+      return {
+        ...state,
+        statusReports: new Map(action.reports.map(r => [r.sessionId, r])),
+        statusWriting: new Set(action.writing),
+        statusFailed: new Set(action.failed),
+      };
+
+    case 'API_CREDITS':
+      return { ...state, apiCredits: action.status };
 
     case 'UI_STATE':
       return { ...state, uiState: action.state, uiSynced: true };
@@ -807,6 +844,43 @@ interface SessionContextValue {
   createTag: (label: string, color: string) => void;
   updateTag: (id: string, patch: { label?: string; color?: string }) => void;
   deleteTag: (id: string) => void;
+  /** Dashboard folders. A session is in at most one: adding it to a folder takes it out of any
+   *  other, and updateFolder's sessionIds replaces the folder's sessions. */
+  createFolder: (name: string, sessionIds?: string[]) => void;
+  updateFolder: (id: string, patch: { name?: string; sessionIds?: string[] }) => void;
+  deleteFolder: (id: string) => void;
+  /** Put a session in a folder, or take it out of its folder (folderId null). */
+  moveToFolder: (sessionId: string, folderId: string | null) => void;
+  /** Write (or rewrite) a session's status note now. */
+  generateStatusReport: (sessionId: string) => void;
+  /** Projects: a new task (a session in the project's folder) in the project of `projectSessionId`
+   *  (any of its sessions); `message` starts it. */
+  createTask: (projectSessionId: string, name: string, model?: string, effort?: string, message?: string) => void;
+  /** /task: ask this session's Claude for a handoff, then start a task with it. */
+  spinOffTask: (sessionId: string, description: string) => void;
+  /** API credits: change the settings; let a session use them when the subscription is out; or, for a
+   *  session sleeping on the usage limit, use them now. */
+  setApiCreditsSettings: (patch: Partial<ApiCreditsSettings>) => void;
+  setApiAllowed: (sessionId: string, allowed: boolean) => void;
+  /** Which sessions this one's project may message with <<to_session>> (main session ids). */
+  setCanMessage: (sessionId: string, ids: string[]) => void;
+  /** Close a task: a summary of its work stays on the project's notes board; the task is deleted. */
+  closeTask: (sessionId: string) => void;
+  apiCreditsNow: (sessionId: string) => void;
+  /** The API credits panel (RateLimitBar's "Manage", or a sleeping session's banner). */
+  showApiCredits: boolean;
+  openApiCredits: () => void;
+  closeApiCredits: () => void;
+  /** Scratch: open it on the conversation in use, or a fresh one after SCRATCH_STALE_HOURS away. */
+  openScratch: () => void;
+  /** Scratch: switch to a new conversation (an unused one, if there is one). */
+  newScratchConversation: () => void;
+  /** Scratch: keep a conversation from expiring, or let it expire again. */
+  setKeep: (sessionId: string, keep: boolean) => void;
+  /** Scratch: make a conversation a session of its own, where it is, with its history. */
+  promoteScratch: (sessionId: string, name: string) => void;
+  /** Scratch: Claude writes a handoff, and a session starts from it in a new project folder or as a task. */
+  scratchHandoff: (sessionId: string, name: string, target: { kind: 'new_project'; folder: string } | { kind: 'task'; projectId: string }) => void;
   pinMessage: (sessionId: string, messageId: string, pinned: boolean) => void;
   setModel: (sessionId: string, model: string) => void;
   setEffort: (sessionId: string, effort: string) => void;
@@ -845,7 +919,7 @@ interface SessionContextValue {
 }
 
 /** The parts of the context that change. Everything else is an action with a stable identity. */
-type SessionStateKey = 'state' | 'isUnread' | 'showSearch' | 'scrollToMessageId' | 'draftAppend';
+type SessionStateKey = 'state' | 'isUnread' | 'showSearch' | 'showApiCredits' | 'scrollToMessageId' | 'draftAppend';
 type SessionStateValue = Pick<SessionContextValue, SessionStateKey>;
 export type SessionActions = Omit<SessionContextValue, SessionStateKey>;
 
@@ -870,6 +944,11 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
     pendingPlans: new Map(),
     triggers: new Map(),
     tags: [],
+    folders: [],
+    apiCredits: null,
+    statusReports: new Map<string, StatusReport>(),
+    statusWriting: new Set<string>(),
+    statusFailed: new Set<string>(),
     uiState: { readAt: {}, closedTabs: {}, pinOrder: [] },
     uiSynced: false,
     sessionSkills: new Map(),
@@ -897,8 +976,10 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
   // Track previous status per session so we only notify on transitions into error
   const prevStatusRef = useRef<Map<string, string>>(new Map());
 
+  // "Project › Task" for a project's task, so a notification says where it came from.
   const sessionName = (sessionId: string): string => {
-    return stateRef.current.sessions.get(sessionId)?.config.name || 'Session';
+    const s = stateRef.current.sessions.get(sessionId);
+    return s ? displayName(s, stateRef.current.sessions) : 'Session';
   };
 
   const handleWsMessage = useCallback((msg: WsOutboundMessage) => {
@@ -993,11 +1074,23 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
       case 'pinned_changed':
         dispatch({ type: 'PINNED_CHANGED', sessionId: msg.sessionId, pinned: msg.pinned });
         break;
+      case 'config_changed':
+        dispatch({ type: 'CONFIG_CHANGED', sessionId: msg.sessionId, config: msg.config });
+        break;
       case 'tags_changed':
         dispatch({ type: 'TAGS_CHANGED', sessionId: msg.sessionId, tags: msg.tags });
         break;
       case 'tags_registry':
         dispatch({ type: 'TAGS_REGISTRY', tags: msg.tags });
+        break;
+      case 'folders_registry':
+        dispatch({ type: 'FOLDERS_REGISTRY', folders: msg.folders });
+        break;
+      case 'api_credits':
+        dispatch({ type: 'API_CREDITS', status: msg.status });
+        break;
+      case 'status_reports':
+        dispatch({ type: 'STATUS_REPORTS', reports: msg.reports, writing: msg.writing, failed: msg.failed });
         break;
       case 'ui_state': {
         // First snapshot from a syncing server: fold in what this browser tracked on its own, once,
@@ -1362,6 +1455,97 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
     wsRef.current?.send({ type: 'delete_tag', id });
   }, []);
 
+  const createFolderFn = useCallback((name: string, sessionIds?: string[]) => {
+    wsRef.current?.send({ type: 'create_folder', name, sessionIds });
+  }, []);
+
+  const updateFolderFn = useCallback((id: string, patch: { name?: string; sessionIds?: string[] }) => {
+    wsRef.current?.send({ type: 'update_folder', id, ...patch });
+  }, []);
+
+  const deleteFolderFn = useCallback((id: string) => {
+    wsRef.current?.send({ type: 'delete_folder', id });
+  }, []);
+
+  const moveToFolderFn = useCallback((sessionId: string, folderId: string | null) => {
+    wsRef.current?.send({ type: 'move_to_folder', sessionId, folderId });
+  }, []);
+
+  const generateStatusReportFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'generate_status_report', sessionId });
+  }, []);
+
+  const createTaskFn = useCallback((projectSessionId: string, name: string, model?: string, effort?: string, message?: string) => {
+    wsRef.current?.send({ type: 'create_task', mainSessionId: projectSessionId, name, model, effort, message });
+  }, []);
+
+  const spinOffTaskFn = useCallback((sessionId: string, description: string) => {
+    wsRef.current?.send({ type: 'spin_off_task', sessionId, description });
+  }, []);
+
+  // Scratch conversations (lib/scratch.ts). A new one is asked of the server, then opened as soon
+  // as it arrives: the conversations known when it was asked for tell it apart.
+  const pendingScratchRef = useRef<{ known: Set<string>; at: number } | null>(null);
+  const startScratchConversation = useCallback((fresh: boolean) => {
+    const st = stateRef.current;
+    const main = getScratchSession(st.sessions);
+    if (!main) return;
+    // A server from before Scratch held conversations: Scratch is the one conversation.
+    if (!main.config.scratchSplitAt) { dispatch({ type: 'SET_ACTIVE_SESSION', sessionId: main.id }); return; }
+    const convs = scratchConversations(main.id, st.sessions.values());
+    const pick = fresh
+      ? convs.find(c => !hasConversation(c) && c.status !== 'working')?.id ?? null
+      : scratchToOpen(convs, st.uiState.readAt);
+    if (pick) { dispatch({ type: 'SET_ACTIVE_SESSION', sessionId: pick }); return; }
+    pendingScratchRef.current = { known: new Set(convs.map(c => c.id)), at: Date.now() };
+    wsRef.current?.send({ type: 'create_task', mainSessionId: main.id, name: SCRATCH_NEW_NAME });
+  }, []);
+  const openScratchFn = useCallback(() => startScratchConversation(false), [startScratchConversation]);
+  const newScratchConversationFn = useCallback(() => startScratchConversation(true), [startScratchConversation]);
+  useEffect(() => {
+    const p = pendingScratchRef.current;
+    if (!p) return;
+    if (Date.now() - p.at > 15_000) { pendingScratchRef.current = null; return; }
+    for (const s of state.sessions.values()) {
+      if (s.config.scratchConversation && !p.known.has(s.id)) {
+        pendingScratchRef.current = null;
+        dispatch({ type: 'SET_ACTIVE_SESSION', sessionId: s.id });
+        return;
+      }
+    }
+  }, [state.sessions]);
+
+  const setApiCreditsSettingsFn = useCallback((patch: Partial<ApiCreditsSettings>) => {
+    wsRef.current?.send({ type: 'set_api_credits', settings: patch });
+  }, []);
+  const setApiAllowedFn = useCallback((sessionId: string, allowed: boolean) => {
+    wsRef.current?.send({ type: 'set_api_allowed', sessionId, allowed });
+  }, []);
+  const closeTaskFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'close_task', sessionId });
+  }, []);
+  const setCanMessageFn = useCallback((sessionId: string, ids: string[]) => {
+    wsRef.current?.send({ type: 'set_can_message', sessionId, ids });
+  }, []);
+  const apiCreditsNowFn = useCallback((sessionId: string) => {
+    wsRef.current?.send({ type: 'api_credits_now', sessionId });
+  }, []);
+  const [showApiCredits, setShowApiCredits] = useState(false);
+  const openApiCredits = useCallback(() => setShowApiCredits(true), []);
+  const closeApiCredits = useCallback(() => setShowApiCredits(false), []);
+
+  const setKeepFn = useCallback((sessionId: string, keep: boolean) => {
+    wsRef.current?.send({ type: 'set_keep', sessionId, keep });
+  }, []);
+
+  const promoteScratchFn = useCallback((sessionId: string, name: string) => {
+    wsRef.current?.send({ type: 'promote_scratch', sessionId, name });
+  }, []);
+
+  const scratchHandoffFn = useCallback((sessionId: string, name: string, target: { kind: 'new_project'; folder: string } | { kind: 'task'; projectId: string }) => {
+    wsRef.current?.send({ type: 'scratch_handoff', sessionId, name, target });
+  }, []);
+
   const setModelFn = useCallback((sessionId: string, model: string) => {
     wsRef.current?.send({ type: 'set_model', sessionId, model });
   }, []);
@@ -1457,6 +1641,25 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
     createTag: createTagFn,
     updateTag: updateTagFn,
     deleteTag: deleteTagFn,
+    createFolder: createFolderFn,
+    updateFolder: updateFolderFn,
+    deleteFolder: deleteFolderFn,
+    moveToFolder: moveToFolderFn,
+    generateStatusReport: generateStatusReportFn,
+    createTask: createTaskFn,
+    spinOffTask: spinOffTaskFn,
+    setApiCreditsSettings: setApiCreditsSettingsFn,
+    setApiAllowed: setApiAllowedFn,
+    setCanMessage: setCanMessageFn,
+    closeTask: closeTaskFn,
+    apiCreditsNow: apiCreditsNowFn,
+    openApiCredits,
+    closeApiCredits,
+    openScratch: openScratchFn,
+    newScratchConversation: newScratchConversationFn,
+    setKeep: setKeepFn,
+    promoteScratch: promoteScratchFn,
+    scratchHandoff: scratchHandoffFn,
     logEvent,
     pinMessage: pinMessageFn,
     setModel: setModelFn,
@@ -1490,8 +1693,8 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
   // The same object for as long as every action keeps its identity, which they all do.
   const actions = useMemo(() => actionList, Object.values(actionList)); // eslint-disable-line react-hooks/exhaustive-deps
   const stateValue = useMemo<SessionStateValue>(
-    () => ({ state, isUnread: isUnreadFn, showSearch, scrollToMessageId, draftAppend }),
-    [state, isUnreadFn, showSearch, scrollToMessageId, draftAppend],
+    () => ({ state, isUnread: isUnreadFn, showSearch, showApiCredits, scrollToMessageId, draftAppend }),
+    [state, isUnreadFn, showSearch, showApiCredits, scrollToMessageId, draftAppend],
   );
 
   return (

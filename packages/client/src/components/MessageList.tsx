@@ -1,6 +1,7 @@
-import { memo, useRef, useState, useCallback, useLayoutEffect } from 'react';
-import type { UIMessage } from '@clauder/shared';
+import { memo, useRef, useState, useCallback, useLayoutEffect, Fragment } from 'react';
+import type { UIMessage, StatusReport } from '@clauder/shared';
 import { MessageBubble } from './MessageBubble';
+import { StatusNoteCard } from './StatusNote';
 import { RichMarkdown } from './RichMarkdown';
 import { useSessionActions } from '../context/SessionContext';
 import { useGuestMode } from '../lib/guestMode';
@@ -42,8 +43,10 @@ function PinnedMessage({ message, sessionId }: { message: UIMessage; sessionId: 
   );
 }
 
-/** Memoized on `messages`, whose identity changes only when this session's messages do. */
-export const MessageList = memo(function MessageList({ messages, sessionId }: { messages: UIMessage[]; sessionId: string }) {
+/** Memoized on `messages`, whose identity changes only when this session's messages do.
+ *  `statusReport` (this task's status note, if any) is drawn where it was written: after the
+ *  last message before it. */
+export const MessageList = memo(function MessageList({ messages, sessionId, statusReport }: { messages: UIMessage[]; sessionId: string; statusReport?: StatusReport | null }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Whether we should auto-scroll on new content. Starts true; flips off the moment the
   // user scrolls away from the bottom, and back on once they scroll (or jump) back to it.
@@ -106,6 +109,10 @@ export const MessageList = memo(function MessageList({ messages, sessionId }: { 
 
   const pinnedMessages = messages.filter(m => m.pinned);
   const reversedMessages = [...messages].reverse();
+  // Newest first, so the note goes just before the newest message older than it (0 = it's the latest).
+  const noteAt = statusReport
+    ? reversedMessages.findIndex(m => Date.parse(m.timestamp) <= Date.parse(statusReport.generatedAt))
+    : -1;
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
@@ -121,8 +128,11 @@ export const MessageList = memo(function MessageList({ messages, sessionId }: { 
         onScroll={handleScroll}
         className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 flex flex-col-reverse gap-2 sm:gap-3"
       >
-        {reversedMessages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} sessionId={sessionId} />
+        {reversedMessages.map((msg, i) => (
+          <Fragment key={msg.id}>
+            {i === noteAt && statusReport && <StatusNoteCard key={statusReport.generatedAt} report={statusReport} latest={i === 0} />}
+            <MessageBubble message={msg} sessionId={sessionId} />
+          </Fragment>
         ))}
       </div>
       {showJumpButton && (

@@ -2,11 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo, type KeyboardEvent, 
 import { useSessions } from '../context/SessionContext';
 import type { ImageAttachment, FileAttachment, Skill, EffortLevel } from '@clauder/shared';
 import { SkillDropdown } from './SkillDropdown';
-
-const MAX_IMAGES = 10;
-const MAX_IMAGE_SIZE = 15 * 1024 * 1024; // 15MB — desktop screenshots/photos routinely exceed 5MB
-const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB
-const MAX_FILES = 5;
+import { MAX_IMAGES, MAX_FILES, readImage, readFile } from '../lib/attachments';
 
 // Touch-primary device (phone/tablet). On these, the soft keyboard's Return should insert a
 // newline rather than submit — you tap Send to send. Evaluated once; device type is stable.
@@ -14,19 +10,6 @@ const IS_TOUCH = typeof window !== 'undefined'
   && typeof window.matchMedia === 'function'
   && window.matchMedia('(pointer: coarse)').matches;
 
-const TEXT_EXTENSIONS = new Set([
-  'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'xml', 'csv',
-  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
-  'py', 'rb', 'php', 'java', 'kt', 'swift', 'go', 'rs', 'c', 'cpp', 'h',
-  'cs', 'sh', 'bash', 'zsh', 'fish', 'sql', 'graphql', 'html', 'css', 'scss',
-  'env', 'gitignore', 'dockerfile', 'makefile', 'lock',
-]);
-
-function isTextFile(file: File): boolean {
-  if (file.type.startsWith('text/')) return true;
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-  return TEXT_EXTENSIONS.has(ext);
-}
 
 // Per-message effort dial — three presets, always exactly one selected ('default' is a real
 // state, not "no override"). Never touches the session's model: effort is the cache-safe cost
@@ -83,9 +66,15 @@ interface PromptInputProps {
   isWorking: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
+  /** `/task <what to do>`: Clauder's own command (never sent to Claude) that spins the work off
+   *  into a new task of this session's project. Absent where tasks don't apply (Scratch). */
+  onTaskCommand?: (description: string) => void;
 }
 
-export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, onDraftChange }: PromptInputProps) {
+/** Clauder's own commands, listed first in the "/" menu. */
+const TASK_COMMAND: Skill = { name: 'task', description: 'Spin this work off into a new task that runs alongside', source: 'clauder' };
+
+export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, onDraftChange, onTaskCommand }: PromptInputProps) {
   const { updateLastActive, refreshSkills, state, draftAppend } = useSessions();
   const [value, setValue] = useState(draft);
   const prevSessionIdRef = useRef(sessionId);
@@ -129,7 +118,8 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
   // Skill dropdown state
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
-  const skills = state.sessionSkills.get(sessionId) ?? [];
+  const sessionSkills = state.sessionSkills.get(sessionId);
+  const skills = useMemo(() => [...(onTaskCommand ? [TASK_COMMAND] : []), ...(sessionSkills ?? [])], [sessionSkills, onTaskCommand]);
 
   // The token after the leading slash, e.g. "sim" when value is "/sim". Empty when
   // value doesn't start with "/" or is just "/". Stops at first whitespace so
@@ -159,61 +149,38 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
   // Rejections used to fail SILENTLY (bare `return`), so an oversized/unsupported file just
   // vanished with no clue why. Now every rejection surfaces a reason via setAttachError.
   const addImageFile = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) { setAttachError(`"${file.name}" isn't an image.`); return; }
-    if (file.size > MAX_IMAGE_SIZE) {
-      setAttachError(`"${file.name}" is too large (${(file.size / 1e6).toFixed(1)}MB — max ${MAX_IMAGE_SIZE / 1e6}MB).`);
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      setImages(prev => {
-        if (prev.length >= MAX_IMAGES) { setAttachError(`Max ${MAX_IMAGES} images per message.`); return prev; }
-        setAttachError(null);
-        return [...prev, { data: base64, mimeType: file.type }];
-      });
-    };
-    reader.onerror = () => setAttachError(`Couldn't read "${file.name}".`);
-    reader.readAsDataURL(file);
+    readImage(file).then(image => setImages(prev => {
+      if (prev.length >= MAX_IMAGES) { setAttachError(`Max ${MAX_IMAGES} images per message.`); return prev; }
+      setAttachError(null);
+      return [...prev, image];
+    }), (err: Error) => setAttachError(err.message));
   }, []);
 
+  // Text is inlined, a PDF goes as a document block, anything else is saved to disk server-side
+  // and handed to Claude as a path (lib/attachments.ts readFile).
   const addFile = useCallback((file: File) => {
-    if (file.size > MAX_FILE_SIZE) {
-      setAttachError(`"${file.name}" is too large (${(file.size / 1e6).toFixed(1)}MB — max ${MAX_FILE_SIZE / 1e6}MB).`);
-      return;
-    }
-    const isPdf = file.type === 'application/pdf';
-    const isText = isTextFile(file);
-
-    const pushFile = (attachment: FileAttachment) => setFiles(prev => {
+    readFile(file).then(attachment => setFiles(prev => {
       if (prev.length >= MAX_FILES) { setAttachError(`Max ${MAX_FILES} files per message.`); return prev; }
       setAttachError(null);
       return [...prev, attachment];
-    });
-
-    if (isText) {
-      // Read as text and inline it directly into the message.
-      const reader = new FileReader();
-      reader.onload = () => pushFile({ name: file.name, mimeType: file.type || 'text/plain', content: reader.result as string, kind: 'text' });
-      reader.onerror = () => setAttachError(`Couldn't read "${file.name}".`);
-      reader.readAsText(file);
-    } else {
-      // PDF → native API document block. Anything else (XLS, docx, zip, …) → 'binary':
-      // the server saves it to disk and hands Claude the path to read with its own tools,
-      // since the API has no content block for those formats.
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        pushFile({ name: file.name, mimeType: file.type || 'application/octet-stream', content: base64, kind: isPdf ? 'document' : 'binary' });
-      };
-      reader.onerror = () => setAttachError(`Couldn't read "${file.name}".`);
-      reader.readAsDataURL(file);
-    }
+    }), (err: Error) => setAttachError(err.message));
   }, []);
 
   const handleSend = useCallback(async (planMode = false) => {
     const trimmed = value.trim();
     if (!trimmed && images.length === 0 && files.length === 0) return;
+    // /task is Clauder's: the session writes a handoff and a new task starts from it.
+    if (onTaskCommand && /^\/task(\s|$)/i.test(trimmed)) {
+      const description = trimmed.replace(/^\/task\s*/i, '');
+      if (!description) { setAttachError('Say what the new task should do, e.g. /task fix the ghost pathing'); return; }
+      if (images.length || files.length) { setAttachError("Attachments can't go with /task. Send them to the new task once it starts."); return; }
+      onTaskCommand(description);
+      setValue('');
+      onDraftChange('');
+      setAttachError(null);
+      setSkillsOpen(false);
+      return;
+    }
     // Downscale at SEND time (not attach time) so previews always show the original and
     // toggling the option off right before sending still sends full resolution.
     const outImages = downscale && images.length > 0
@@ -235,7 +202,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
     setDownscale(true);
     setSendMode('default');
     setSkillsOpen(false);
-  }, [value, images, files, downscale, sendMode, onSend, onDraftChange]);
+  }, [value, images, files, downscale, sendMode, onSend, onDraftChange, onTaskCommand]);
 
   const insertSkill = useCallback((skill: Skill) => {
     // Replace the leading "/<token>" (and an optional trailing space) with "/<name> "
@@ -290,9 +257,9 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
   const handleChange = useCallback((next: string) => {
     setValue(next);
     onDraftChange(next);
-    // Auto-open dropdown when the user starts a slash command; close otherwise
-    if (next.startsWith('/')) setSkillsOpen(true);
-    else setSkillsOpen(false);
+    // Open the dropdown while the user is typing a slash command's name; once they've moved on to
+    // its arguments (a space), close it, so Enter sends instead of re-picking the command.
+    setSkillsOpen(/^\/\S*$/.test(next));
   }, [onDraftChange]);
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { FileViewer } from './FileViewer';
 import { fileKind, fileIcon } from '../lib/fileKinds';
+import { fileTabUrl, wantsNewTab } from '../lib/fileLinks';
 
 interface FileEntry {
   name: string;
@@ -108,9 +109,27 @@ export function FileBrowser({ cwd }: FileBrowserProps) {
                 <span className="text-gray-500 w-5 text-center shrink-0 text-xs">
                   {fileIcon(entry.type === 'directory' ? 'directory' : kind)}
                 </span>
-                <span className={`flex-1 min-w-0 truncate ${entry.type === 'directory' ? 'text-blue-400' : viewable ? 'text-gray-300' : 'text-gray-500'}`}>
-                  {entry.name}
-                </span>
+                {kind !== null ? (
+                  // A real link, so right-click "Open in New Tab" and Cmd/Ctrl/middle-click work; a
+                  // plain click still opens the viewer here.
+                  <a
+                    href={fileTabUrl(cwd, entry.path)}
+                    target="_blank"
+                    rel="noopener"
+                    onClick={(e) => {
+                      if (wantsNewTab(e)) { e.stopPropagation(); return; }
+                      e.preventDefault();
+                    }}
+                    className="flex-1 min-w-0 truncate text-gray-300"
+                    title={`${entry.name} (right-click to open in a new tab)`}
+                  >
+                    {entry.name}
+                  </a>
+                ) : (
+                  <span className={`flex-1 min-w-0 truncate ${entry.type === 'directory' ? 'text-blue-400' : viewable ? 'text-gray-300' : 'text-gray-500'}`}>
+                    {entry.name}
+                  </span>
+                )}
                 {entry.type === 'file' && (
                   <button
                     onClick={(e) => { e.stopPropagation(); downloadFile(entry.path); }}

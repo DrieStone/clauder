@@ -143,6 +143,19 @@ export function recordSubscriptionLimits(windows: { session?: RateLimitWindow | 
   listener?.(getRateLimitInfo());
 }
 
+/** When the subscription is out of usage, the time it comes back; null while it isn't. A window
+ *  counts only while its reset is still ahead: a "rejected" left over from a window that has since
+ *  rolled over means nothing. */
+export function subscriptionBlockedUntilMs(now = Date.now()): number | null {
+  let until: number | null = null;
+  for (const w of [sessionWindow, weeklyWindow]) {
+    if (!w || w.status !== 'rejected') continue;
+    const at = Date.parse(w.resetsAt);
+    if (at > now && (until === null || at > until)) until = at;
+  }
+  return until;
+}
+
 // ── Credit guardrail: effort capping ─────────────────────────────────────────
 // Effort is the cache-SAFE cost dial: lowering it on the same model cuts thinking/output
 // tokens without cold-starting the prompt cache (a model switch re-caches the whole context

@@ -10,12 +10,15 @@ import { toClientState, toClientHistory } from './client-view.js';
 import type { TriggerManager } from './triggers.js';
 import type { TagManager } from './tags.js';
 import type { UiStateManager } from './ui-state.js';
+import type { FolderManager } from './folders.js';
+import type { StatusReportManager } from './status-reports.js';
+import type { ApiCredits } from './api-credits.js';
 import { logUsage } from './usage-log.js';
 import { ensureProjectFolder } from './projects.js';
 import { resolveAccess, type Access } from './auth.js';
 import { normalizeIp } from './network.js';
 import { shareBaseUrl, type ShareManager } from './shares.js';
-import { forGuest, toGuestState, guestMessages } from './guest-view.js';
+import { forGuest, toGuestState, guestMessages, guestAttachments } from './guest-view.js';
 
 /** Pull a few known-safe scalar fields off an inbound WS message for the usage log. Never
  *  includes free-text fields that may carry conversation/note/goal content (message, notes,
@@ -34,7 +37,7 @@ function safeDetail(msg: any): Record<string, unknown> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
-export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager, getShares: () => ShareManager) {
+export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager, getShares: () => ShareManager, getFolders: () => FolderManager, getStatusReports: () => StatusReportManager, getApiCredits: () => ApiCredits) {
   // permessage-deflate cuts the initial sessions_list payload from ~3MB to ~500KB.
   // Without it, the client can't finish processing before the server sends its next
   // message, and browsers disconnect+reconnect in a tight loop.
@@ -77,7 +80,7 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       if (access.role === 'owner') {
         client.send(data);
       } else if (access.role === 'guest') {
-        const out = forGuest(msg, access.share);
+        const out = forGuest(msg, access.share, (id) => sessionManager.projectIdOfAny(id));
         if (out) client.send(JSON.stringify(out));
       }
     }
@@ -145,6 +148,21 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
       // TagManager may not be initialized yet — skip
     }
 
+    // Dashboard folders
+    try {
+      ws.send(JSON.stringify({ type: 'folders_registry', folders: getFolders().list() }));
+    } catch {
+      // FolderManager may not be initialized yet — skip
+    }
+
+    // Status notes for idle projects
+    try {
+      ws.send(JSON.stringify({ type: 'status_reports', ...getStatusReports().snapshot() }));
+      ws.send(JSON.stringify({ type: 'api_credits', status: getApiCredits().status() }));
+    } catch {
+      // StatusReportManager may not be initialized yet — skip
+    }
+
     // Cross-device view state: read status, closed tabs, pinned-tab order
     try {
       ws.send(JSON.stringify({ type: 'ui_state', state: getUiState().snapshot() }));
@@ -163,10 +181,10 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
     // scan per session on every connect. SessionView asks for the session you open instead.
   }
 
-  /** A guest's whole world: its one session, stripped of the owner's private state, and its name. */
+  /** A guest's whole world: the shared session and its project's tasks, stripped of the owner's
+   *  private state, and its name. */
   function sendGuestSnapshot(ws: WebSocket, share: ShareLink) {
-    const session = sessionManager.getSession(share.sessionId);
-    const sessions = session ? [toGuestState(toClientState(session.getState()), share)] : [];
+    const sessions = sessionManager.projectSessions(share.sessionId).map(s => toGuestState(toClientState(s.getState()), share));
     ws.send(JSON.stringify({ type: 'sessions_list', sessions }));
     ws.send(JSON.stringify({ type: 'guest_info', sessionId: share.sessionId, guestName: share.guestName }));
   }
@@ -195,7 +213,7 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
         if (access.role === 'guest') {
           await handleGuestMessage(msg, access.share.id, sessionManager, getShares(), reply, () => ws.close(4403, 'revoked'));
         } else {
-          await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, getShares, reply);
+          await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, getShares, getFolders, getStatusReports, getApiCredits, reply);
         }
       } catch (err: any) {
         console.error('[WS] Error handling message:', err);
@@ -218,10 +236,10 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
   return { wss, broadcast, disconnectShare, getClientCount: () => clients.size };
 }
 
-/** A guest may watch its session, load its history, send messages and stop a turn: nothing else,
- *  and only for its own session. Anything else is ignored without an answer. The link is looked up
- *  fresh each time, so a renamed guest or new rules apply at once and a revoked link stops working
- *  even on an open connection. */
+/** A guest may watch the shared project's sessions (the shared one and its tasks), load their
+ *  history, send them messages and stop a turn: nothing else. Anything else is ignored without an
+ *  answer. The link is looked up fresh each time, so a renamed guest or new rules apply at once and
+ *  a revoked link stops working even on an open connection. */
 async function handleGuestMessage(
   msg: WsInboundMessage,
   shareId: string,
@@ -236,27 +254,36 @@ async function handleGuestMessage(
     disconnect();
     return;
   }
-  const sessionId = share.sessionId;
+  // Only the shared project's sessions.
+  const sessionId = 'sessionId' in msg && typeof msg.sessionId === 'string' ? msg.sessionId : '';
+  if (!sessionId || sessionManager.projectIdOfAny(sessionId) !== share.sessionId) return;
   switch (msg.type) {
     case 'request_history': {
       const session = sessionManager.getSession(sessionId);
-      if (session && msg.sessionId === sessionId) {
+      if (session) {
         reply({ type: 'session_history', sessionId, messages: guestMessages(toClientHistory(session.getState()), share) });
       }
       return;
     }
     case 'send_message': {
-      if (msg.sessionId !== sessionId) return;
       const text = String(msg.message ?? '').trim().slice(0, 20_000);
-      if (!text) return;
-      logUsage('guest_send_message', { sessionId });
+      const attachments = guestAttachments(msg.images, msg.files);
+      if ('error' in attachments) {
+        reply({ type: 'error', sessionId, message: attachments.error });
+        return;
+      }
+      const { images, files } = attachments;
+      if (!text && images.length === 0 && files.length === 0) return;
+      logUsage('guest_send_message', { sessionId, attachments: images.length + files.length });
       shares.touch(share.id);
-      // Text only, on the session's own model: no attachments, plan mode, or per-turn overrides.
-      await sessionManager.sendMessage(sessionId, text, undefined, { author: { name: share.guestName, shareId: share.id } });
+      // On the session's own model: no plan mode or per-turn overrides.
+      await sessionManager.sendMessage(sessionId, text, images.length ? images : undefined, {
+        author: { name: share.guestName, shareId: share.id },
+        files: files.length ? files : undefined,
+      });
       return;
     }
     case 'interrupt_session': {
-      if (msg.sessionId !== sessionId) return;
       logUsage('guest_interrupt', { sessionId });
       await sessionManager.interruptSession(sessionId);
       return;
@@ -276,6 +303,9 @@ async function handleMessage(
   getTags: () => TagManager,
   getUiState: () => UiStateManager,
   getShares: () => ShareManager,
+  getFolders: () => FolderManager,
+  getStatusReports: () => StatusReportManager,
+  getApiCredits: () => ApiCredits,
   /** Send to the requesting client only (not a broadcast). */
   reply: (msg: WsOutboundMessage) => void,
 ) {
@@ -423,6 +453,26 @@ async function handleMessage(
       }
       break;
     }
+
+    // Dashboard folders. The manager validates ids and broadcasts the full list after any change.
+    case 'create_folder':
+      getFolders().create({ name: msg.name, sessionIds: msg.sessionIds });
+      break;
+    case 'update_folder':
+      getFolders().update(msg.id, { name: msg.name, sessionIds: msg.sessionIds });
+      break;
+    case 'delete_folder':
+      getFolders().delete(msg.id);
+      break;
+    case 'move_to_folder':
+      getFolders().move(msg.sessionId, msg.folderId ?? null);
+      break;
+
+    // Takes up to a few minutes; the manager broadcasts progress and the result.
+    case 'generate_status_report':
+      if (!sessionManager.getSession(msg.sessionId)) throw new Error('Session not found');
+      getStatusReports().write(msg.sessionId, 'manual').catch(err => console.error('[StatusReports] Write failed:', err));
+      break;
 
     case 'pin_message': {
       try {
@@ -779,6 +829,88 @@ async function handleMessage(
       break;
     }
 
+    // Project tasks (project.ts): a new session in the project's folder, or a /task spin-off.
+    case 'create_task': {
+      try {
+        sessionManager.createTask(msg.mainSessionId, { name: String(msg.name ?? ''), model: msg.model, effort: msg.effort, message: typeof msg.message === 'string' ? msg.message : undefined });
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.mainSessionId, message: err.message });
+      }
+      break;
+    }
+    case 'spin_off_task': {
+      try {
+        sessionManager.spinOffTask(msg.sessionId, String(msg.description ?? ''));
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    // API credits (api-credits.ts): the settings, which sessions may use them, and "use them now".
+    case 'set_api_credits': {
+      getApiCredits().updateSettings(msg.settings && typeof msg.settings === 'object' ? msg.settings : {});
+      break;
+    }
+    case 'set_api_allowed': {
+      try {
+        sessionManager.setApiAllowed(msg.sessionId, !!msg.allowed);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+    case 'close_task': {
+      sessionManager.closeTask(msg.sessionId).catch((err: any) => broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message }));
+      break;
+    }
+    case 'set_can_message': {
+      try {
+        sessionManager.setCanMessage(msg.sessionId, Array.isArray(msg.ids) ? msg.ids.filter((x): x is string => typeof x === 'string').slice(0, 50) : []);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+    case 'api_credits_now': {
+      try {
+        sessionManager.useApiCreditsNow(msg.sessionId);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
+    // Scratch conversations (scratch.ts): keep one, make it a session of its own, or hand it off.
+    case 'set_keep': {
+      try {
+        sessionManager.setKeep(msg.sessionId, !!msg.keep);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+    case 'promote_scratch': {
+      try {
+        sessionManager.promoteScratch(msg.sessionId, String(msg.name ?? ''));
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+    case 'scratch_handoff': {
+      try {
+        const t = msg.target;
+        const target = t?.kind === 'task'
+          ? { kind: 'task' as const, projectId: String(t.projectId ?? '') }
+          : { kind: 'new_project' as const, folder: String((t as { folder?: unknown })?.folder ?? '') };
+        sessionManager.scratchHandoff(msg.sessionId, String(msg.name ?? ''), target);
+      } catch (err: any) {
+        broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
+      }
+      break;
+    }
+
     case 'rename_thread': {
       try {
         sessionManager.renameThread(msg.sessionId, msg.threadId, msg.name);
@@ -794,8 +926,10 @@ async function handleMessage(
 
     // Share links. The manager broadcasts the updated list to owner connections.
     case 'create_share': {
-      if (!sessionManager.getSession(msg.sessionId)) throw new Error('Session not found');
-      getShares().create({ sessionId: msg.sessionId, guestName: String(msg.guestName ?? ''), rules: String(msg.rules ?? '') });
+      // A link shares a whole project, so it always points at the main session.
+      const projectId = sessionManager.projectIdOfAny(msg.sessionId);
+      if (!projectId || !sessionManager.getSession(projectId)) throw new Error('Session not found');
+      getShares().create({ sessionId: projectId, guestName: String(msg.guestName ?? ''), rules: String(msg.rules ?? '') });
       break;
     }
     case 'update_share':

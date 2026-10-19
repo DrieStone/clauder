@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import { RichMarkdown } from './RichMarkdown';
 import { ZoomableImage } from './ZoomableImage';
 import { fileKind } from '../lib/fileKinds';
+import { fileTabUrl } from '../lib/fileLinks';
 
 interface FileViewerProps {
   cwd: string;
   filePath: string;
   fileName: string;
-  onBack: () => void;
+  /** Absent on the file's own tab (/view), which has nothing to go back to. */
+  onBack?: () => void;
 }
 
 export function FileViewer({ cwd, filePath, fileName, onBack }: FileViewerProps) {
@@ -17,12 +19,14 @@ export function FileViewer({ cwd, filePath, fileName, onBack }: FileViewerProps)
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-800 shrink-0">
-        <button
-          onClick={onBack}
-          className="text-gray-400 hover:text-gray-200 text-sm transition-colors shrink-0"
-        >
-          &larr; Back
-        </button>
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="text-gray-400 hover:text-gray-200 text-sm transition-colors shrink-0"
+          >
+            &larr; Back
+          </button>
+        )}
         <span className="text-sm text-gray-300 truncate font-medium flex-1">{fileName}</span>
         <a
           href={`/api/files/download?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(filePath)}`}
@@ -32,9 +36,9 @@ export function FileViewer({ cwd, filePath, fileName, onBack }: FileViewerProps)
         >
           Download ↓
         </a>
-        {(kind === 'image' || kind === 'video') && (
+        {onBack && (
           <a
-            href={rawUrl}
+            href={fileTabUrl(cwd, filePath)}
             target="_blank"
             rel="noopener noreferrer"
             className="text-[10px] text-gray-500 hover:text-gray-300 shrink-0"
