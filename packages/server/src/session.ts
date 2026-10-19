@@ -2185,6 +2185,14 @@ export class ManagedSession {
 
       for await (const msg of this.readNdjson(this.activeProcess)) {
         resetStallTimer(); // Got a message — reset stall detection
+        // A background task reporting that it finished arrives as its own (non-assistant) message.
+        {
+          const t = (msg as any)?.type;
+          if (t !== 'assistant' && t !== 'stream_event') {
+            const raw = JSON.stringify(msg);
+            if (raw.includes('task-notification')) background.onNotification(raw.replace(/\\n/g, '\n'));
+          }
+        }
 
         // Capture session_id for resume. When forking, the CLI returns a new
         // session ID - grab it so subsequent messages use the fork, not the original.

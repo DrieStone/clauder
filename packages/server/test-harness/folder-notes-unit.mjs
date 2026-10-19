@@ -1,0 +1,20 @@
+// What a shell command counts as changing (folder-notes.ts shellChanges).
+const { shellChanges } = await import(new URL('../dist/folder-notes.js', import.meta.url).pathname);
+let pass = 0, fail = 0;
+const eq = (cmd, want) => { const got = shellChanges(cmd); const ok = JSON.stringify(got) === JSON.stringify(want); ok ? pass++ : fail++; console.log(ok ? '  ✓' : '  ✗', JSON.stringify(cmd).slice(0, 90), ok ? '' : `→ ${JSON.stringify(got)} (want ${JSON.stringify(want)})`); };
+eq('HOME=/tmp/x /Users/jsweet/clauder/node_modules/@anthropic-ai/claude-code/bin/claude.exe -p hi > /Users/j/proj/out.txt', ['/Users/j/proj/out.txt']);
+eq('mkdir -p /a/b && /Users/jsweet/clauder/bin/claude.exe --version', ['/a/b']);
+eq('cp /src/a.png /dst/b.png', ['/dst/b.png']);
+eq('cp -r /src/dir /dst/', ['/dst/']);
+eq('mv /a/x /b/y', ['/a/x', '/b/y']);
+eq('rm -f /p/q.txt /p/r.txt', ['/p/q.txt', '/p/r.txt']);
+eq('cat /p/a.txt | grep foo', []);
+eq('ls /p 2>/dev/null', []);
+eq("sed -i '' 's/a/b/' /p/f.md", ['/p/f.md']);
+eq('sed -n 1,5p /p/f.md', []);
+eq('git -C /repo commit -m x', ['/repo']);
+eq('git -C /repo status', []);
+eq('nohup /usr/bin/python3 /p/run.py > /p/log.txt 2>&1 &', ['/p/log.txt']);
+eq("python3 - <<'EOF'\nopen('/p/x','w')\nrm /not/a/command\nEOF\ntouch /p/done", ['/p/done']);
+eq('cd /p && tar -xzf /dl/a.tgz', ['/dl/a.tgz']);
+console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);

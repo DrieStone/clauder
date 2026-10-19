@@ -18,7 +18,8 @@ ManagedSession.prototype.spawnClaudeProcess = function (extraArgs, stdinPayload)
     line({ type: 'system', subtype: 'init', model: 'm', session_id: sid });
     let n = 0;
     for (const step of b.steps ?? []) {
-      const id = 'tu' + (++n) + crypto.randomUUID().slice(0, 4);
+      if (step.notify) { line({ type: 'user', message: { role: 'user', content: step.notify }, session_id: sid }); continue; }
+      const id = step.id ?? ('tu' + (++n) + crypto.randomUUID().slice(0, 4));
       line({ type: 'assistant', message: { id: 'm' + crypto.randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id, name: step.name, input: step.input }] }, session_id: sid });
       if (step.result) line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: step.result }] }, session_id: sid });
     }
@@ -92,6 +93,21 @@ console.log('no false alarms');
   id = mk('plain'); calls.length = 0; script = () => ({ steps: [{ name: 'Bash', input: { command: 'ls' }, result: 'a' }], text: 'ok' });
   await sm.sendMessage(id, 'go'); await settle(id);
   ok(calls.length === 1, 'ordinary turn untouched');
+}
+
+console.log('an agent that reports back by itself is not stranded');
+{
+  const id = mk('reported'); calls.length = 0;
+  const done = (tid, toolId) => `<task-notification>\n<task-id>${tid}</task-id>\n<tool-use-id>${toolId}</tool-use-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n</task-notification>`;
+  script = () => ({ steps: [{ ...AG, id: 'toolu_A1' }, { notify: done('a1b2c3', 'toolu_A1') }], text: 'All agents reported; here is the report.' });
+  await sm.sendMessage(id, 'research'); await settle(id);
+  ok(calls.length === 1 && !sys(id).some(x => x.startsWith('⚠️')), 'finished agent: no warning, no redo message', [calls.length, sys(id)]);
+  // one finished, one still running: only the running one is reported
+  const id2 = mk('half'); calls.length = 0;
+  script = (k) => k === 1 ? ({ steps: [{ ...AG, id: 'toolu_B1' }, { ...BG, id: 'toolu_B2' }, { notify: done('a1b2c3', 'toolu_B1') }], text: 'one back' }) : { text: 'ok' };
+  await sm.sendMessage(id2, 'go'); await settle(id2);
+  const w = sys(id2).find(x => x.startsWith('⚠️')) ?? '';
+  ok(w.includes('command: long build') && !w.includes('agent:'), 'only the unfinished one is reported', w);
 }
 
 console.log('loop guard, queue, goal');

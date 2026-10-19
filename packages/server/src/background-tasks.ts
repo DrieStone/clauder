@@ -35,6 +35,19 @@ export class BackgroundTracker {
     }
   }
 
+  /** A task's own report that it finished (a <task-notification> the CLI passes on mid-turn):
+   *  nothing was lost, so it counts as handled. */
+  onNotification(text: string): void {
+    for (const m of text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>|<task-notification>([\s\S]*)/g)) {
+      const body = m[1] ?? m[2] ?? '';
+      const status = /<status>([^<]+)<\/status>/.exec(body)?.[1]?.trim();
+      if (!status || status === 'running') continue;
+      const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(body)?.[1]?.trim();
+      const taskId = /<task-id>([^<]+)<\/task-id>/.exec(body)?.[1]?.trim();
+      for (const t of this.tasks.values()) if ((toolUseId && t.toolUseId === toolUseId) || (taskId && t.id === taskId)) t.handled = true;
+    }
+  }
+
   /** A tool result: for a task just started, it carries the CLI's id for it. */
   onToolResult(toolUseId: string, text: string): void {
     const t = this.tasks.get(toolUseId);

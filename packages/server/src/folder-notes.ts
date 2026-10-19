@@ -44,12 +44,50 @@ const HOME = os.homedir();
 const norm = (p: string) => path.resolve(p.startsWith('~/') || p === '~' ? path.join(HOME, p.slice(1)) : p).replace(/\/+$/, '');
 const inside = (file: string, folder: string) => file === folder || file.startsWith(folder + '/');
 
-// A shell command that probably writes to every path it names: a file-changing program, an
-// in-place edit, or a git command that changes the tree. Otherwise only an output redirect's own
-// target counts (not a numbered stream like 2>/dev/null), so `grep x /a/b > /tmp/out` flags nothing.
-const PROGRAM_WRITES_RE = /(?:^|[\s;&|(])(?:cp|mv|rm|rmdir|mkdir|touch|tee|ln|rsync|install|unzip|tar|patch|truncate|dd)\s|\bsed\s+(?:-[a-zA-Z]*i|--in-place)|\bperl\s+-[a-zA-Z]*i|\bgit\s+(?:-C\s+\S+\s+)?(?:commit|add|checkout|switch|reset|restore|apply|merge|rebase|stash|pull|rm|mv|clean|cherry-pick|revert)\b/;
+// Shell commands are read piece by piece (split at ;, &&, ||, | and newlines). A piece counts the
+// paths it writes to: its output redirect's target, and, for a file-changing program, the paths it
+// is given. Never the program itself (running /x/claude.exe changes nothing), never a copy's source.
 const REDIRECT_RE = /(?:^|[^0-9&>])>>?\s*["']?((?:~\/|\/)[^\s'"|;&<>()]+)/g;
-const PATH_RE = /(?:^|[\s'"=:(])((?:~\/|\/)[^\s'"|;&<>()]+)/g;
+const ABS_RE = /^(?:[\w.-]+=)?((?:~\/|\/)[^\s'"|;&<>()]+)$/;
+/** Programs that change every path they're given. */
+const CHANGES_ALL = new Set(['mv', 'rm', 'rmdir', 'mkdir', 'touch', 'tee', 'truncate', 'unzip', 'tar', 'patch', 'dd', 'chmod', 'chown']);
+/** Programs that change only the last path they're given (the destination). */
+const CHANGES_LAST = new Set(['cp', 'rsync', 'install', 'ln', 'ditto']);
+const WRAPPERS = new Set(['sudo', 'nohup', 'env', 'time', 'exec', 'command']);
+const GIT_CHANGES = /^(?:commit|add|checkout|switch|reset|restore|apply|merge|rebase|stash|pull|rm|mv|clean|cherry-pick|revert)$/;
+
+/** The paths a shell command probably writes to. */
+export function shellChanges(command: string): string[] {
+  // A heredoc's body is data, not commands.
+  const lines: string[] = [];
+  let until: string | null = null;
+  for (const line of command.split('\n')) {
+    if (until !== null) { if (line.trim() === until) until = null; continue; }
+    lines.push(line);
+    const h = /<<-?\s*['"]?(\w+)['"]?/.exec(line);
+    if (h) until = h[1];
+  }
+  const out: string[] = [];
+  for (const piece of lines.join('\n').split(/&&|\|\||[;|\n]/)) {
+    for (const m of piece.matchAll(REDIRECT_RE)) out.push(m[1]);
+    const tokens = (piece.match(/"[^"]*"|'[^']*'|\S+/g) ?? [])
+      .map(t => t.replace(/^["']|["']$/g, ''))
+      .filter(t => !/^\d?>/.test(t));
+    while (tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]) || WRAPPERS.has(tokens[0]) || tokens[0] === '(')) tokens.shift();
+    if (!tokens.length) continue;
+    const prog = tokens[0].replace(/^\(/, '').replace(/^.*\//, '');
+    const args = tokens.slice(1);
+    const paths = args.map(t => ABS_RE.exec(t)?.[1]).filter((x): x is string => !!x);
+    if (CHANGES_ALL.has(prog)) out.push(...paths);
+    else if (CHANGES_LAST.has(prog)) { if (paths.length) out.push(paths[paths.length - 1]); }
+    else if ((prog === 'sed' && args.some(a => /^-[a-zA-Z]*i|^--in-place/.test(a))) || (prog === 'perl' && args.some(a => /^-[a-zA-Z]*i/.test(a)))) out.push(...paths);
+    else if (prog === 'git') {
+      const sub = args.find((a, i) => !a.startsWith('-') && args[i - 1] !== '-C');
+      if (sub && GIT_CHANGES.test(sub)) out.push(...paths);
+    }
+  }
+  return out;
+}
 
 /** The files a tool call changed, or probably changed: absolute paths. */
 export function changedPaths(tool: { name: string; input: Record<string, unknown> }): { path: string; how: ChangeHow }[] {
@@ -59,11 +97,9 @@ export function changedPaths(tool: { name: string; input: Record<string, unknown
     return typeof p === 'string' && p.startsWith('/') ? [{ path: norm(p), how: 'edited' }] : [];
   }
   if (tool.name === 'Bash' && typeof input.command === 'string') {
-    const cmd = input.command;
-    const found = PROGRAM_WRITES_RE.test(cmd) ? cmd.matchAll(PATH_RE) : cmd.matchAll(REDIRECT_RE);
     const out: { path: string; how: ChangeHow }[] = [];
-    for (const m of found) {
-      const p = m[1].replace(/[.,:]+$/, '');
+    for (const raw of shellChanges(input.command)) {
+      const p = raw.replace(/[.,:]+$/, '');
       if (p.length > 1 && !p.startsWith('/dev/') && !p.startsWith('/tmp/')) out.push({ path: norm(p), how: 'shell' });
     }
     return out;
