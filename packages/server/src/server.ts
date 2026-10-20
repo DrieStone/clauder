@@ -16,6 +16,10 @@ import { search, smartSearch } from './search.js';
 import { getGitStatus } from './git-status.js';
 import { resolveAccess, setAuthCookie, getAuthToken, isOwnerKey } from './auth.js';
 import { shareBaseUrl, type ShareManager } from './shares.js';
+import type { ChildProcess } from 'child_process';
+
+/** A re-login waiting for its sign-in code (see /api/claude-auth/login). */
+let pendingLogin: { proc: ChildProcess; output: string; done: null | boolean; waiters: ((ok: boolean) => void)[] } | null = null;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -265,56 +269,82 @@ export function createApp(
     });
   });
 
+  // Re-login. `claude auth login` prints a sign-in address, then waits: either the browser on this
+  // Mac finishes it by itself, or (signing in from a phone, away from the Mac) the sign-in page shows
+  // a code that has to be typed into the CLI. The process is kept open for that: the code is posted
+  // to /api/claude-auth/code and written to its input.
   app.post('/api/claude-auth/login', (_req, res) => {
     logUsage('reauth_login');
+    if (pendingLogin) { try { pendingLogin.proc.kill(); } catch { /* gone */ } pendingLogin = null; }
     const cli = findCliPath();
     const cmd = cli.isNative ? cli.command : process.execPath;
     const args = cli.isNative ? ['auth', 'login', '--claudeai'] : [cli.command, 'auth', 'login', '--claudeai'];
-    const proc = spawnChild(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawnChild(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const login = { proc, output: '', done: null as null | boolean, waiters: [] as ((ok: boolean) => void)[] };
+    pendingLogin = login;
 
     let responded = false;
-    let output = '';
-
     const tryExtractUrl = (chunk: string) => {
-      output += chunk;
+      login.output = (login.output + chunk).slice(-4000);
       if (responded) return;
-      // CLI prints: "If the browser didn't open, visit: <url>"
-      const match = output.match(/visit:\s*(https:\/\/\S+)/);
+      const match = login.output.match(/visit:\s*(https:\/\/\S+)/);
       if (match) {
         responded = true;
         res.json({ ok: true, url: match[1] });
       }
     };
-
     proc.stdout?.on('data', (d: Buffer) => tryExtractUrl(d.toString()));
     proc.stderr?.on('data', (d: Buffer) => tryExtractUrl(d.toString()));
 
-    // Fallback: if no URL extracted within 5s, respond without one (browser may have auto-opened)
     const timeout = setTimeout(() => {
-      if (!responded) {
-        responded = true;
-        res.json({ ok: true, url: null });
-      }
+      if (!responded) { responded = true; res.json({ ok: true, url: null }); }
     }, 5000);
+    // Nobody finished it in 15 minutes: give up.
+    const expire = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } }, 15 * 60_000);
 
     proc.on('close', (code) => {
       clearTimeout(timeout);
-      if (!responded) {
-        responded = true;
-        res.json({ ok: code === 0, url: null });
-      }
-      if (code === 0) {
-        getBroadcast()({ type: 'auth_restored' });
-      }
+      clearTimeout(expire);
+      if (!responded) { responded = true; res.json({ ok: code === 0, url: null }); }
+      login.done = code === 0;
+      for (const w of login.waiters) w(code === 0);
+      if (pendingLogin === login) pendingLogin = null;
+      if (code === 0) getBroadcast()({ type: 'auth_restored' });
     });
-
     proc.on('error', (err) => {
       clearTimeout(timeout);
-      if (!responded) {
-        responded = true;
-        res.status(500).json({ ok: false, error: err.message });
-      }
+      clearTimeout(expire);
+      if (pendingLogin === login) pendingLogin = null;
+      if (!responded) { responded = true; res.status(500).json({ ok: false, error: err.message }); }
     });
+  });
+
+  // The code the sign-in page shows ("Paste this into Claude Code"), from the browser.
+  app.post('/api/claude-auth/code', (req, res) => {
+    const code = String(req.body?.code ?? '').trim();
+    if (!/^[A-Za-z0-9_#.~-]{20,500}$/.test(code)) {
+      res.status(400).json({ ok: false, error: "That doesn't look like the sign-in code. Copy it again from the sign-in page." });
+      return;
+    }
+    const login = pendingLogin;
+    if (!login || login.done !== null) {
+      res.status(409).json({ ok: false, error: 'The sign-in has expired. Tap Re-authenticate to start again.' });
+      return;
+    }
+    logUsage('reauth_code');
+    const finish = (ok: boolean) => {
+      if (res.headersSent) return;
+      if (ok) res.json({ ok: true });
+      else res.status(400).json({ ok: false, error: 'Anthropic refused that code. Start again and use the new code.' });
+    };
+    login.waiters.push(finish);
+    setTimeout(() => {
+      if (res.headersSent) return;
+      // Still running: if the CLI said it failed, say so; otherwise it's still working on it.
+      const failed = /error|invalid|fail/i.test(login.output.slice(-300));
+      res.status(failed ? 400 : 202).json({ ok: false, pending: !failed, error: failed ? 'Anthropic refused that code. Start again and use the new code.' : 'Still checking the code…' });
+    }, 30_000);
+    try { login.proc.stdin?.write(code + '\n'); } catch (err: any) { res.status(500).json({ ok: false, error: err.message }); }
   });
 
   // --- Triggers (watches + scheduled tasks) ---

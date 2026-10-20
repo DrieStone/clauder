@@ -637,35 +637,9 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             />
           )}
 
-          {/* Auth expired banner */}
-          {authExpired && (
-            <div className="mx-4 mt-2 px-3 py-2 bg-amber-900/30 border border-amber-700 rounded text-xs text-amber-200 shrink-0 flex flex-wrap items-center justify-between gap-2">
-              <span>
-                {authState === 'waiting'
-                  ? 'Complete authentication in the new tab, then return here.'
-                  : 'Claude authentication expired. Re-login required.'}
-              </span>
-              <button
-                onClick={async () => {
-                  if (authState === 'waiting') return;
-                  setAuthState('waiting');
-                  try {
-                    const res = await fetch('/api/claude-auth/login', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.url) {
-                      window.open(data.url, '_blank', 'noopener');
-                    }
-                  } catch {
-                    setAuthState('idle');
-                  }
-                }}
-                disabled={authState === 'waiting'}
-                className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 disabled:cursor-wait text-white rounded transition-colors whitespace-nowrap"
-              >
-                {authState === 'waiting' ? 'Waiting…' : 'Re-authenticate'}
-              </button>
-            </div>
-          )}
+          {/* Auth expired banner. Signing in from a phone, the sign-in page shows a code instead of
+              finishing by itself: it's pasted here and passed to the CLI waiting on the Mac. */}
+          {authExpired && <ReauthBanner waiting={authState === 'waiting'} setWaiting={(w) => setAuthState(w ? 'waiting' : 'idle')} />}
 
           {/* Error banner */}
           {session.error && !authExpired && (
@@ -1560,3 +1534,76 @@ function PermissionPrompt({
 }
 
 export { PermissionPrompt, formatToolInput };
+
+/** The re-login banner: start sign-in, open the sign-in page, and paste the code it shows. */
+function ReauthBanner({ waiting, setWaiting }: { waiting: boolean; setWaiting: (w: boolean) => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [code, setCode] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const start = async () => {
+    setMsg(null); setCode(''); setWaiting(true);
+    try {
+      const data = await (await fetch('/api/claude-auth/login', { method: 'POST' })).json();
+      setUrl(data.url ?? null);
+      if (!data.url) setMsg('Sign-in started on the Mac. If a code appears, paste it below.');
+    } catch {
+      setWaiting(false);
+      setMsg("Couldn't start the sign-in. Try again.");
+    }
+  };
+  const submit = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const res = await fetch('/api/claude-auth/code', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: code.trim() }) });
+      const data = await res.json();
+      setMsg(data.ok ? 'Signed in. Carrying on…' : data.error ?? 'That didn\'t work.');
+    } catch {
+      setMsg('Couldn\'t reach Clauder. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mx-4 mt-2 px-3 py-2 bg-amber-900/30 border border-amber-700 rounded text-xs text-amber-200 shrink-0 space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span>{waiting ? 'Sign in to Claude to carry on.' : 'Claude authentication expired. Re-login required.'}</span>
+        <button
+          onClick={start}
+          className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white rounded transition-colors whitespace-nowrap"
+        >
+          {waiting ? 'Start again' : 'Re-authenticate'}
+        </button>
+      </div>
+      {waiting && (
+        <div className="space-y-1.5">
+          {url && (
+            <div>1. <a href={url} target="_blank" rel="noopener" className="underline text-amber-100">Open the sign-in page</a> and sign in.</div>
+          )}
+          <div>{url ? '2. ' : ''}If it shows a code ("Paste this into Claude Code"), copy it and paste it here:</div>
+          <div className="flex gap-2">
+            <input
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && code.trim()) submit(); }}
+              placeholder="Paste the code"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              className="flex-1 min-w-0 bg-gray-900 border border-amber-700/60 rounded px-2 py-1.5 text-gray-100 font-mono text-[11px] outline-none focus:border-amber-500"
+            />
+            <button
+              onClick={submit}
+              disabled={!code.trim() || busy}
+              className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white rounded whitespace-nowrap"
+            >
+              {busy ? 'Checking…' : 'Finish'}
+            </button>
+          </div>
+          <div className="text-amber-300/70">On this Mac, the sign-in usually finishes by itself and this banner goes away.</div>
+        </div>
+      )}
+      {msg && <div className="text-amber-100">{msg}</div>}
+    </div>
+  );
+}
