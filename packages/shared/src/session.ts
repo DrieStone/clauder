@@ -607,3 +607,19 @@ export interface UiState {
   closedTabs: Record<string, number>;
   pinOrder: string[];
 }
+
+/** Keeping sessions' prompt caches warm (server/src/keep-warm.ts), as the owner's browser sees it. */
+export interface KeepWarmStatus {
+  /** Keep projects warm automatically while the owner is around. */
+  auto: boolean;
+  /** The owner has done something in Clauder in the last two hours. */
+  around: boolean;
+  /** The 🔥 button's default length, in hours. */
+  defaultHours: number;
+  /** Projects (main session ids) being kept warm now, and until when. */
+  projects: Record<string, { until: string; mode: 'manual' | 'auto' }>;
+  /** Pings so far, and what they cost (API-equivalent), since `since`. */
+  pings: number;
+  costUsd: number;
+  since: string;
+}

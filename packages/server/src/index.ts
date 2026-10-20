@@ -15,6 +15,8 @@ import { UiStateManager } from './ui-state.js';
 import { FolderManager } from './folders.js';
 import { StatusReportManager } from './status-reports.js';
 import { ApiCredits } from './api-credits.js';
+import { KeepWarm } from './keep-warm.js';
+import { getRateLimitInfo, subscriptionBlockedUntilMs } from './rate-limits.js';
 import { initAuth } from './auth.js';
 import { ShareManager, shareBaseUrl, guestNote, revokedGuestNote } from './shares.js';
 import { ProjectRunner } from './project-runner.js';
@@ -59,6 +61,8 @@ let folderManager: FolderManager;
 let statusReports: StatusReportManager;
 // API credits — keep working on the owner's API credit when the subscription is out. Wired up post-WS.
 let apiCredits: ApiCredits;
+// Keep-warm — pings sessions shortly before their prompt cache expires. Wired up post-WS.
+let keepWarm: KeepWarm;
 // Share links — one session per named guest on the local network. Wired up post-WS.
 let shareManager: ShareManager;
 // Project Runner — drives overnight autonomous runs. Wired up post-WS.
@@ -75,7 +79,7 @@ const app = createApp(sessionManager, () => triggerManager, () => projectRunner,
 const server = http.createServer(app);
 
 // Set up WebSocket on the same server
-const { broadcast, getClientCount, disconnectShare } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager, () => shareManager, () => folderManager, () => statusReports, () => apiCredits);
+const { broadcast, getClientCount, disconnectShare } = setupWebSocket(server, sessionManager, () => triggerManager, () => projectRunner, () => modelPlanRunner, () => tagManager, () => uiStateManager, () => shareManager, () => folderManager, () => statusReports, () => apiCredits, () => keepWarm);
 broadcastFn = broadcast;
 
 // Tag registry — broadcast the full snapshot to all clients after any CRUD.
@@ -114,6 +118,20 @@ sessionManager.onSessionDestroyed((id) => statusReports.removeSession(id));
 apiCredits = new ApiCredits({ onChange: (status) => broadcast({ type: 'api_credits', status }) });
 apiCredits.load();
 sessionManager.setApiCredits(apiCredits);
+
+// Keep-warm: a project the owner wrote in lately stays warm while they're around, or one they've
+// warmed by hand stays warm for its set time. Sessions get a tiny hidden turn just before their
+// prompt cache would expire, never on API credits and never near the usage limit.
+keepWarm = new KeepWarm({
+  sessions: () => sessionManager.warmSessions(),
+  ping: (id) => sessionManager.keepWarmPing(id),
+  quotaBlocked: () => (getRateLimitInfo().session?.usedPercent ?? 0) >= 90 || subscriptionBlockedUntilMs() !== null,
+  onChange: (status) => broadcast({ type: 'keep_warm', status }),
+});
+keepWarm.load();
+keepWarm.start();
+sessionManager.onOwnerWrote((projectId) => keepWarm.ownerWrote(projectId));
+sessionManager.onSessionDestroyed((id) => { keepWarm.removeSession(id); keepWarm.setManualIfSet(id); });
 
 // Share links. Owners get the full list after any change (a guest's connection filters it out); a
 // revoked link's open connections are dropped at once. Each guest message reaches Claude behind a

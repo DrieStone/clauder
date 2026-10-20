@@ -20,6 +20,7 @@ import { MonitorBanner } from './MonitorBanner';
 import { RateLimitBar } from './RateLimitBar';
 import { ProjectTaskBar } from './ProjectTasks';
 import { ScratchBar } from './ScratchBar';
+import { KeepWarmButton } from './KeepWarm';
 import { projectIdOf, isTask, tasksByMain, projectActivity } from '../lib/projects';
 import { inScratch, noteScratchSeen } from '../lib/scratch';
 import { RichMarkdown } from './RichMarkdown';
@@ -346,6 +347,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
               )}
               <span className="truncate max-w-[120px]">{s.config.name}</span>
               {taskCount > 0 && <span className="shrink-0 text-[10px] text-gray-500" title={`${taskCount} task${taskCount !== 1 ? 's' : ''}`}>+{taskCount}</span>}
+              {state.keepWarm?.projects[s.id] && <span className="shrink-0 text-[10px]" title="Kept warm">🔥</span>}
               <button
                 onClick={(e) => { e.stopPropagation(); togglePin(s.id, !pinned); }}
                 className={`shrink-0 transition-opacity ${pinned ? 'opacity-100 text-amber-400' : 'opacity-40 group-hover:opacity-70 hover:!opacity-100 text-gray-400'}`}
@@ -476,6 +478,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           <TagControl session={session} />
           <SessionTagChips session={session} />
           <GitIndicator sessionId={session.id} working={session.status === 'working'} />
+          <KeepWarmButton session={session} />
         </div>
         <div className="order-2 sm:order-3 flex items-center gap-0.5 sm:gap-3 shrink-0">
           <RateLimitBar />

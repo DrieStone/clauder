@@ -13,6 +13,7 @@ import type { UiStateManager } from './ui-state.js';
 import type { FolderManager } from './folders.js';
 import type { StatusReportManager } from './status-reports.js';
 import type { ApiCredits } from './api-credits.js';
+import type { KeepWarm } from './keep-warm.js';
 import { logUsage } from './usage-log.js';
 import { ensureProjectFolder } from './projects.js';
 import { resolveAccess, type Access } from './auth.js';
@@ -37,7 +38,7 @@ function safeDetail(msg: any): Record<string, unknown> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
-export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager, getShares: () => ShareManager, getFolders: () => FolderManager, getStatusReports: () => StatusReportManager, getApiCredits: () => ApiCredits) {
+export function setupWebSocket(server: Server, sessionManager: SessionManager, getTriggers: () => TriggerManager, getProjectRunner: () => import('./project-runner.js').ProjectRunner, getModelPlanRunner: () => import('./model-plan-runner.js').ModelPlanRunner, getTags: () => TagManager, getUiState: () => UiStateManager, getShares: () => ShareManager, getFolders: () => FolderManager, getStatusReports: () => StatusReportManager, getApiCredits: () => ApiCredits, getKeepWarm: () => KeepWarm) {
   // permessage-deflate cuts the initial sessions_list payload from ~3MB to ~500KB.
   // Without it, the client can't finish processing before the server sends its next
   // message, and browsers disconnect+reconnect in a tight loop.
@@ -159,6 +160,7 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
     try {
       ws.send(JSON.stringify({ type: 'status_reports', ...getStatusReports().snapshot() }));
       ws.send(JSON.stringify({ type: 'api_credits', status: getApiCredits().status() }));
+      ws.send(JSON.stringify({ type: 'keep_warm', status: getKeepWarm().status() }));
     } catch {
       // StatusReportManager may not be initialized yet — skip
     }
@@ -213,7 +215,9 @@ export function setupWebSocket(server: Server, sessionManager: SessionManager, g
         if (access.role === 'guest') {
           await handleGuestMessage(msg, access.share.id, sessionManager, getShares(), reply, () => ws.close(4403, 'revoked'));
         } else {
-          await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, getShares, getFolders, getStatusReports, getApiCredits, reply);
+          // Anything but a heartbeat means the owner is around (keep-warm.ts).
+          if (msg.type !== 'ping') getKeepWarm().ownerActive();
+          await handleMessage(msg, sessionManager, broadcast, getTriggers, getProjectRunner, getModelPlanRunner, getTags, getUiState, getShares, getFolders, getStatusReports, getApiCredits, getKeepWarm, reply);
         }
       } catch (err: any) {
         console.error('[WS] Error handling message:', err);
@@ -306,6 +310,7 @@ async function handleMessage(
   getFolders: () => FolderManager,
   getStatusReports: () => StatusReportManager,
   getApiCredits: () => ApiCredits,
+  getKeepWarm: () => KeepWarm,
   /** Send to the requesting client only (not a broadcast). */
   reply: (msg: WsOutboundMessage) => void,
 ) {
@@ -858,6 +863,15 @@ async function handleMessage(
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }
+      break;
+    }
+    case 'set_keep_warm': {
+      const hours = msg.hours === null ? null : Number(msg.hours);
+      getKeepWarm().setManual(String(msg.projectId ?? ''), hours && isFinite(hours) ? hours : null);
+      break;
+    }
+    case 'set_keep_warm_auto': {
+      getKeepWarm().setAuto(!!msg.enabled);
       break;
     }
     case 'close_task': {

@@ -140,6 +140,15 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     `MAX_RELAYS_WITHOUT_OWNER` per pair of projects until a person writes in either. The receiver
     gets `crossRelayNote` (`author.crossProject`); a whitelisted sender gets `canMessageNote` on each
     message, never in its system prompt.
+  - `keep-warm.ts` — keeps prompt caches from expiring (a cold resume re-sends the whole
+    conversation: $6-12 on big Opus sessions, 266 times in Oct 1-20). A project is warm automatically
+    for 3h after the owner writes in it while they're "around" (any non-heartbeat WS message in the
+    last 2h), or by hand via the header's 🔥 (3h default, 1h, until 11 PM). Each still-warm session in
+    it (last call 54-60 min ago) gets `ManagedSession.keepWarmPing`: a low-effort turn on its own model
+    and conversation, run with broadcast silenced and the chat, lastActiveAt, status and any wakeup put
+    back, so it leaves no trace; already-cold sessions aren't pinged. Never on API credits, never at
+    90%+ of the 5-hour window. Saved to `~/.clauder/keep-warm.json`. Pings assume the CLI reuses the
+    cache on a low-effort turn: true on 2.1.286, NOT on 2.1.288+ until #100065 is fixed.
   - `tags.ts` — `TagManager`: the registry of user-defined colored session tags
     (`{id,label,color}`), persisted to `~/.clauder/tags.json` (atomic write,
     TriggerManager-style). Broadcasts the full snapshot on any CRUD. Sessions
@@ -184,7 +193,7 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
   `RateLimitBar.tsx` (real subscription %).
 - `packages/client/src/lib/notifications.ts` — browser Notification API.
 - `~/.clauder/` (outside repo) — runtime state: `auth-token`, `sessions.json`,
-  `sessions.json.bak`, `project-runs.json`, `triggers.json`, `tags.json`, `folders.json`, `status-reports.json`, `ui-state.json`, `folder-notes.json`, `api-key` (mode 600), `api-credits.json`,
+  `sessions.json.bak`, `project-runs.json`, `triggers.json`, `tags.json`, `folders.json`, `status-reports.json`, `ui-state.json`, `folder-notes.json`, `api-key` (mode 600), `api-credits.json`, `keep-warm.json`, `project-notes.json`,
   `task-rosters/`, `clauder.log`, `backups/`, `mcp-configs/`.
 
 ## How sessions work (non-obvious)

@@ -87,6 +87,8 @@ interface SessionCardProps {
   tasks?: number;
   tasksWorking?: number;
   tasksNeedYou?: number;
+  /** Kept warm (keep-warm.ts): its label ("auto", "2h 10m"), or absent. A string, so the memo holds. */
+  warm?: string;
 }
 
 /** "🧵 3 tasks · 1 working" on a project's card. */
@@ -111,10 +113,15 @@ function TaskCountChip({ tasks = 0, working = 0, needYou = 0, scratch = false }:
 /** Memoized: the Dashboard re-renders on every WS message, a card only when its own session, tier,
  *  or unread flag changes. Its parts use useSessionActions()/useTagRegistry(), not useSessions(),
  *  since any full-context read inside would re-render it on every message anyway. */
-export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen, statusNote, tasks, tasksWorking, tasksNeedYou }: SessionCardProps) {
+export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen, statusNote, tasks, tasksWorking, tasksNeedYou, warm }: SessionCardProps) {
   const onClick = useCallback(() => onOpen(session.id), [onOpen, session.id]);
   const tip = statusNote ? `📋 Where it stands\n${statusNote}` : session.summary;
-  const taskChip = <TaskCountChip tasks={tasks} working={tasksWorking} needYou={tasksNeedYou} scratch={!!session.config.isScratch} />;
+  const taskChip = (
+    <>
+      <TaskCountChip tasks={tasks} working={tasksWorking} needYou={tasksNeedYou} scratch={!!session.config.isScratch} />
+      {warm && <span className="text-[10px] leading-3 px-1.5 py-0.5 rounded border border-orange-500/40 text-orange-300 bg-orange-500/10 whitespace-nowrap" title="Kept warm: coming back to it costs a cache read, not a full re-send">🔥 {warm}</span>}
+    </>
+  );
   switch (tier) {
     case 'hot':
       return <HotSessionCard session={session} unread={unread} tip={tip} taskChip={taskChip} onClick={onClick} />;

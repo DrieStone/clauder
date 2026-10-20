@@ -1,4 +1,4 @@
-import type { SessionConfig, SessionState, ApiCreditsSettings, ApiCreditsStatus, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, SessionFolder, StatusReport, UIMessage, UiState, ShareLink, MessageAuthor } from './session.js';
+import type { SessionConfig, SessionState, ApiCreditsSettings, ApiCreditsStatus, KeepWarmStatus, DiscoveredSession, ToolActivity, ContextUsage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, GoalState, ModelPlan, MonitorInfo, ThreadSummary, TagDef, SessionFolder, StatusReport, UIMessage, UiState, ShareLink, MessageAuthor } from './session.js';
 import type { ProjectRun, RunBudget } from './project-run.js';
 
 // Browser -> Server
@@ -70,6 +70,9 @@ export type WsInboundMessage =
   | { type: 'set_can_message'; sessionId: string; ids: string[] }
   /** Close a task: a summary of its work goes on the project's notes board, then the task is deleted. */
   | { type: 'close_task'; sessionId: string }
+  /** Keep a project warm by hand for `hours` (null stops it); or switch automatic warming. */
+  | { type: 'set_keep_warm'; projectId: string; hours: number | null }
+  | { type: 'set_keep_warm_auto'; enabled: boolean }
   | { type: 'api_credits_now'; sessionId: string }
   | { type: 'set_goal'; sessionId: string; goal: { text: string; checkEveryMin?: number; deadlineHours?: number; maxNudges?: number } | null }
   | { type: 'set_notes'; sessionId: string; notes: string | null }
@@ -168,6 +171,8 @@ export type WsOutboundMessage =
   | { type: 'ui_state'; state: UiState }
   /** API credits: settings, key state, spend (sent on connect and after any change). Owners only. */
   | { type: 'api_credits'; status: ApiCreditsStatus }
+  /** Keep-warm state (sent on connect and when it changes). Owners only. */
+  | { type: 'keep_warm'; status: KeepWarmStatus }
   /** Every share link, to owner connections only. `baseUrl` is this Mac on the local network. */
   | { type: 'shares_snapshot'; shares: ShareLink[]; baseUrl: string }
   /** Sent to a guest connection once, on connect: which session it's scoped to and who it is. */

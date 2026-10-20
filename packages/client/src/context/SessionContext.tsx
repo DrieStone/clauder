@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, SessionFolder, StatusReport, UiState, ShareLink, MessageAuthor, ApiCreditsStatus, ApiCreditsSettings } from '@clauder/shared';
+import type { SessionState, SessionConfig, DiscoveredSession, WsOutboundMessage, UIMessage, RateLimitInfo, PermissionMode, ImageAttachment, FileAttachment, QueuedMessage, ToolResultInfo, DebugLogEntry, PendingWakeup, Trigger, Skill, ProjectRun, RunBudget, GoalState, ModelPlan, MonitorInfo, TagDef, SessionFolder, StatusReport, UiState, ShareLink, MessageAuthor, ApiCreditsStatus, ApiCreditsSettings, KeepWarmStatus } from '@clauder/shared';
 import { trimMessages, SCRATCH_NEW_NAME } from '@clauder/shared';
 import { displayName } from '../lib/projects';
 import { getScratchSession } from '../lib/sessions';
@@ -50,6 +50,8 @@ interface AppState {
   statusFailed: Set<string>;
   /** API credits: settings, key state and spend, from the server (owner only). Null until it says. */
   apiCredits: ApiCreditsStatus | null;
+  /** Keep-warm state (server/src/keep-warm.ts). Null until the server says. */
+  keepWarm: KeepWarmStatus | null;
   /** Read status, closed tabs and pinned-tab order. Synced across devices by the server once
    *  `uiSynced`; until then (a server that predates syncing) kept in this browser only. */
   uiState: UiState;
@@ -115,6 +117,7 @@ type Action =
   | { type: 'FOLDERS_REGISTRY'; folders: SessionFolder[] }
   | { type: 'STATUS_REPORTS'; reports: StatusReport[]; writing: string[]; failed: string[] }
   | { type: 'API_CREDITS'; status: ApiCreditsStatus }
+  | { type: 'KEEP_WARM'; status: KeepWarmStatus }
   | { type: 'UI_STATE'; state: UiState }
   | { type: 'UI_MARK_READ'; sessionId: string; at: string }
   | { type: 'UI_TAB_CLOSED'; sessionId: string; closedAt: number | null }
@@ -494,6 +497,9 @@ function reducer(state: AppState, action: Action): AppState {
     case 'API_CREDITS':
       return { ...state, apiCredits: action.status };
 
+    case 'KEEP_WARM':
+      return { ...state, keepWarm: action.status };
+
     case 'UI_STATE':
       return { ...state, uiState: action.state, uiSynced: true };
 
@@ -866,6 +872,9 @@ interface SessionContextValue {
   setCanMessage: (sessionId: string, ids: string[]) => void;
   /** Close a task: a summary of its work stays on the project's notes board; the task is deleted. */
   closeTask: (sessionId: string) => void;
+  /** Keep a project warm by hand for `hours` (null stops), or switch automatic warming. */
+  setKeepWarm: (projectId: string, hours: number | null) => void;
+  setKeepWarmAuto: (enabled: boolean) => void;
   apiCreditsNow: (sessionId: string) => void;
   /** The API credits panel (RateLimitBar's "Manage", or a sleeping session's banner). */
   showApiCredits: boolean;
@@ -946,6 +955,7 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
     tags: [],
     folders: [],
     apiCredits: null,
+    keepWarm: null,
     statusReports: new Map<string, StatusReport>(),
     statusWriting: new Set<string>(),
     statusFailed: new Set<string>(),
@@ -1088,6 +1098,9 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
         break;
       case 'api_credits':
         dispatch({ type: 'API_CREDITS', status: msg.status });
+        break;
+      case 'keep_warm':
+        dispatch({ type: 'KEEP_WARM', status: msg.status });
         break;
       case 'status_reports':
         dispatch({ type: 'STATUS_REPORTS', reports: msg.reports, writing: msg.writing, failed: msg.failed });
@@ -1521,6 +1534,12 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
   const setApiAllowedFn = useCallback((sessionId: string, allowed: boolean) => {
     wsRef.current?.send({ type: 'set_api_allowed', sessionId, allowed });
   }, []);
+  const setKeepWarmFn = useCallback((projectId: string, hours: number | null) => {
+    wsRef.current?.send({ type: 'set_keep_warm', projectId, hours });
+  }, []);
+  const setKeepWarmAutoFn = useCallback((enabled: boolean) => {
+    wsRef.current?.send({ type: 'set_keep_warm_auto', enabled });
+  }, []);
   const closeTaskFn = useCallback((sessionId: string) => {
     wsRef.current?.send({ type: 'close_task', sessionId });
   }, []);
@@ -1652,6 +1671,8 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
     setApiAllowed: setApiAllowedFn,
     setCanMessage: setCanMessageFn,
     closeTask: closeTaskFn,
+    setKeepWarm: setKeepWarmFn,
+    setKeepWarmAuto: setKeepWarmAutoFn,
     apiCreditsNow: apiCreditsNowFn,
     openApiCredits,
     closeApiCredits,

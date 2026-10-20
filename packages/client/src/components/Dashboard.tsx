@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type DragEvent } from 'react';
 import type { SessionState, SessionFolder } from '@clauder/shared';
 import { useSessions } from '../context/SessionContext';
+import { warmLabel } from './KeepWarm';
 import { SessionCard, type CardTier } from './SessionCard';
 import { SessionConfigForm } from './SessionConfig';
 import { SessionBrowser } from './SessionBrowser';
@@ -195,6 +196,7 @@ export function Dashboard() {
         unread={isUnread(session)}
         onOpen={session.config.isScratch ? openScratch : setActiveSession}
         statusNote={noteFor(session)}
+        warm={state.keepWarm?.projects[session.id] ? warmLabel(state.keepWarm.projects[session.id].until, state.keepWarm.projects[session.id].mode) : undefined}
         tasks={taskMap.get(session.id)?.length}
         tasksWorking={taskMap.get(session.id)?.filter(t => t.status === 'working').length}
         tasksNeedYou={taskMap.get(session.id)?.filter(t => !!t.waitingFor).length}

@@ -233,6 +233,8 @@ export class ManagedSession {
   private apiRetryScheduled = false;
   /** Whether the last turn ran on API credits (to say so when it changes). */
   private lastTurnOnApi = false;
+  /** A keep-warm ping is running (keepWarmPing): it leaves no trace in the chat or the session's state. */
+  private pinging = false;
   /** Background work that died with the last turn: what to tell Claude once the turn has wound down. */
   private pendingBgRecovery: string | null = null;
   /** Times in a row Claude was told its background work died, with no person writing in between. */
@@ -833,6 +835,48 @@ export class ManagedSession {
     this.broadcast({ type: 'wakeup_scheduled', sessionId: this.id, wakeup: this.pendingWakeup });
     console.log(`[Session ${this.id}] Rate limited — sleeping until ${this.pendingWakeup.scheduledAt}`);
   }
+
+  /** Keep this session's prompt cache from expiring (keep-warm.ts): a tiny turn on its own model and
+   *  conversation, at low effort, that re-reads the conversation from the cache and so restarts the
+   *  cache's hour. It leaves no trace: nothing is broadcast, and the chat, the session's last-active
+   *  time and its status are put back as they were. Returns what it cost, or null if it didn't run. */
+  async keepWarmPing(): Promise<number | null> {
+    if (this.status !== 'idle' || this.activeProcess || this.pendingTaskSwitch || this.pinging || !this.sdkSessionId) return null;
+    if (this.pendingWakeup || this.queuedMessages.length) return null;
+    const saved = { messages: this.messages.slice(), lastActiveAt: this.lastActiveAt, error: this.error, contextUsage: this.contextUsage };
+    const costBefore = this.totalCostUsd;
+    const realBroadcast = this.broadcast;
+    this.pinging = true;
+    this.broadcast = () => {};
+    try {
+      await this.sendMessage('[Clauder keep-warm] Reply with just "ok". Do nothing else.', [], { internal: true, keepWarm: true, effort: 'low' });
+    } catch (err) {
+      console.error(`[Session ${this.id}] keep-warm ping failed:`, err);
+    } finally {
+      // A ping that hit the usage limit mustn't leave a rate-limit sleep behind (nothing was asked).
+      if (this.pendingWakeup) { this.clearWakeupTimer(); this.pendingWakeup = null; }
+      this.messages = saved.messages;
+      this.lastActiveAt = saved.lastActiveAt;
+      this.error = saved.error;
+      this.contextUsage = saved.contextUsage;
+      this.status = 'idle';
+      this.currentToolActivity = null;
+      this.broadcast = realBroadcast;
+      this.pinging = false;
+    }
+    // Anything that arrived while the ping ran goes now.
+    if (this.queuedMessages.length && this.status === 'idle') {
+      const next = this.queuedMessages.shift()!;
+      this.broadcast({ type: 'queue_update', sessionId: this.id, queue: [...this.queuedMessages] });
+      this.sendMessage(next.text, next.images, { internal: next.internal, files: next.files, model: next.model, effort: next.effort as EffortLevel | undefined, author: next.author }).catch(err => {
+        console.error(`Error processing queued message for session ${this.id}:`, err);
+      });
+    }
+    return Math.max(0, this.totalCostUsd - costBefore);
+  }
+
+  /** Whether a keep-warm ping is running. */
+  get isPinging(): boolean { return this.pinging; }
 
   /** What api-credits.ts needs to know to decide on a turn. */
   private apiRequest(opts?: { author?: MessageAuthor }): ApiTurnRequest {
@@ -1683,7 +1727,7 @@ export class ManagedSession {
   /** `author` marks a guest's message (share links). It must survive every path that re-sends a
    *  message (queue, retry, auto-recovery, plan fallback): losing it would pass a guest's words to
    *  Claude as the owner's. */
-  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: EffortLevel; author?: MessageAuthor }): Promise<void> {
+  async sendMessage(message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: EffortLevel; author?: MessageAuthor; keepWarm?: boolean }): Promise<void> {
     // If busy OR a task-switch classification is in flight, queue and bail.
     // Queueing while classifying preserves order: messages arriving during the
     // ~500ms Haiku call wait their turn instead of racing.
@@ -1815,7 +1859,7 @@ export class ManagedSession {
 
       // Out of subscription usage, on a session the owner allowed (or approved just now): run on
       // API credits. The plan is null on any ordinary turn, which changes nothing below.
-      apiPlan = this.apiCredits?.plan(this.apiRequest(opts)) ?? null;
+      apiPlan = opts?.keepWarm ? null : (this.apiCredits?.plan(this.apiRequest(opts)) ?? null);
 
       if (this.sdkSessionId) {
         flags.push('--resume', this.sdkSessionId);
@@ -2099,7 +2143,7 @@ export class ManagedSession {
       // in this folder and the commit rules (project.ts). In the message rather than the system
       // prompt so it never costs the prompt cache. Not on a message from another session of the
       // project (its own note covers it), nor on a slash command, which a prefix would break.
-      const projectNote = opts?.author?.sessionId || message.trimStart().startsWith('/')
+      const projectNote = opts?.author?.sessionId || opts?.keepWarm || message.trimStart().startsWith('/')
         ? null
         : (this.describeProject?.() ?? null);
       const prefix = [projectNote, attribution].filter(Boolean).join('\n\n');
@@ -3033,6 +3077,7 @@ export class ManagedSession {
       // own cadence) so skip there — this is only for turns with no other safety net.
       if (
         !usedSchedulingThisTurn
+        && !this.pinging
         && !this.pendingBgRecovery
         && !this.pendingWakeup
         && this.config.modelPlan?.status !== 'running'
@@ -3225,7 +3270,7 @@ export class ManagedSession {
     const bgRecovery = this.pendingBgRecovery;
     this.pendingBgRecovery = null;
     const sleepingOnRateLimit = this.pendingWakeup?.toolUseId === ManagedSession.RATE_LIMIT_WAKEUP_ID;
-    if (this.queuedMessages.length > 0 && this.status === 'idle' && !sleepingOnRateLimit && !this.apiRetryScheduled) {
+    if (this.queuedMessages.length > 0 && this.status === 'idle' && !sleepingOnRateLimit && !this.apiRetryScheduled && !this.pinging) {
       const next = this.queuedMessages.shift()!;
       this.broadcast({
         type: 'queue_update',

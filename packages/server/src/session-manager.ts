@@ -72,6 +72,8 @@ export class SessionManager {
   /** A project that got a message from another may answer it for a day, whitelisted or not:
    *  receiving project -> (sending project -> until, epoch ms). */
   private replyWindows = new Map<string, Map<string, number>>();
+  /** The owner wrote in a project (index.ts: keep-warm.ts keeps it warm while they're around). */
+  private ownerWroteListener: ((projectId: string) => void) | null = null;
   /** Whether a project is shared with a guest (index.ts); those never send or receive <<to_session>>. */
   private isShared: (projectId: string) => boolean = () => false;
 
@@ -93,6 +95,31 @@ export class SessionManager {
     session.onNewTask = (m) => this.taskFromSentinel(session.id, m);
     session.describeProject = () => this.projectNoteFor(session.id);
     if (this.apiCredits) session.apiCredits = this.apiCredits;
+  }
+
+  onOwnerWrote(fn: (projectId: string) => void): void { this.ownerWroteListener = fn; }
+
+  /** Sessions as keep-warm.ts sees them. */
+  warmSessions(): { id: string; projectId: string; name: string; lastActiveMs: number; idle: boolean }[] {
+    return [...this.sessions.values()]
+      .filter(s => !s.config.isScratch && s.sdkSessionId)
+      .map(s => ({
+        id: s.id,
+        // A Scratch conversation is its own project here: warming one doesn't warm the rest of Scratch.
+        projectId: s.config.scratchConversation ? s.id : projectIdOf(s),
+        name: s.config.name,
+        lastActiveMs: Date.parse(s.lastActiveAt) || 0,
+        idle: s.status === 'idle' && !s.isPinging,
+      }));
+  }
+
+  /** A keep-warm ping for one session (ManagedSession.keepWarmPing). */
+  async keepWarmPing(sessionId: string): Promise<number | null> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    const cost = await s.keepWarmPing();
+    if (cost !== null) this.persist();
+    return cost;
   }
 
   /** Tell <<to_session>> which projects are shared with guests (index.ts). */
@@ -358,6 +385,7 @@ export class SessionManager {
     }
 
     // A person wrote in this project (the owner, or a guest): its sessions may message each other again.
+    if (!opts?.internal && !opts?.author) this.ownerWroteListener?.(session.config.scratchConversation ? session.id : projectIdOf(session));
     if (!opts?.internal) {
       const pid = projectIdOf(session);
       this.relayCounts.delete(pid);
