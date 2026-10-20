@@ -12,7 +12,8 @@ import Markdown from 'react-markdown';
 
 export type CardTier = 'hot' | 'warm' | 'history';
 
-function SummaryTooltip({ summary }: { summary: string }) {
+/** Hover (or tap) to see `summary` in a floating box. Shows ⓘ unless given something else to hover. */
+function SummaryTooltip({ summary, children }: { summary: string; children?: ReactNode }) {
   const iconRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -39,14 +40,16 @@ function SummaryTooltip({ summary }: { summary: string }) {
     <>
       <span
         ref={iconRef}
-        className="shrink-0 cursor-help text-gray-500 hover:text-gray-300"
+        className={children ? 'shrink-0 cursor-help' : 'shrink-0 cursor-help text-gray-500 hover:text-gray-300'}
         onClick={(e) => { e.stopPropagation(); visible ? hide() : show(); }}
         onMouseEnter={show}
         onMouseLeave={hide}
       >
-        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
+        {children ?? (
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        )}
       </span>
       {visible && createPortal(
         <div
@@ -87,38 +90,42 @@ interface SessionCardProps {
   tasks?: number;
   tasksWorking?: number;
   tasksNeedYou?: number;
+  /** The tasks one per line ("⚠️ name · needs you"), shown when hovering the task count. A string,
+   *  so the memo still holds. */
+  taskList?: string;
   /** Kept warm (keep-warm.ts): its label ("auto", "2h 10m"), or absent. A string, so the memo holds. */
   warm?: string;
 }
 
 /** "🧵 3 tasks · 1 working" on a project's card. */
-function TaskCountChip({ tasks = 0, working = 0, needYou = 0, scratch = false }: { tasks?: number; working?: number; needYou?: number; scratch?: boolean }) {
+function TaskCountChip({ tasks = 0, working = 0, needYou = 0, scratch = false, list }: { tasks?: number; working?: number; needYou?: number; scratch?: boolean; list?: string }) {
   if (!tasks) return null;
   // Scratch's "tasks" are its conversations (lib/scratch.ts).
   const noun = scratch ? 'conversation' : 'task';
   const parts = [`${tasks} ${noun}${tasks !== 1 ? 's' : ''}`];
   if (needYou) parts.push(`${needYou} need${needYou === 1 ? 's' : ''} you`);
   else if (working) parts.push(`${working} working`);
-  return (
+  const chip = (
     <span
       className={`inline-flex items-center gap-1 text-[10px] leading-3 px-1.5 py-0.5 rounded border whitespace-nowrap ${needYou ? 'text-amber-300 border-amber-600/50 bg-amber-500/10' : working ? 'text-amber-200/90 border-amber-700/40' : 'text-gray-400 border-gray-700'}`}
-      title={scratch ? 'Scratch conversations: quick sessions of their own' : "Tasks: other sessions working in this project's folder"}
+      title={list ? undefined : scratch ? 'Scratch conversations: quick sessions of their own' : "Tasks: other sessions working in this project's folder"}
     >
       {working > 0 && <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />}
       {scratch ? '💬' : '🧵'} {parts.join(' · ')}
     </span>
   );
+  return list ? <SummaryTooltip summary={list}>{chip}</SummaryTooltip> : chip;
 }
 
 /** Memoized: the Dashboard re-renders on every WS message, a card only when its own session, tier,
  *  or unread flag changes. Its parts use useSessionActions()/useTagRegistry(), not useSessions(),
  *  since any full-context read inside would re-render it on every message anyway. */
-export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen, statusNote, tasks, tasksWorking, tasksNeedYou, warm }: SessionCardProps) {
+export const SessionCard = memo(function SessionCard({ session, tier, unread, onOpen, statusNote, tasks, tasksWorking, tasksNeedYou, taskList, warm }: SessionCardProps) {
   const onClick = useCallback(() => onOpen(session.id), [onOpen, session.id]);
   const tip = statusNote ? `📋 Where it stands\n${statusNote}` : session.summary;
   const taskChip = (
     <>
-      <TaskCountChip tasks={tasks} working={tasksWorking} needYou={tasksNeedYou} scratch={!!session.config.isScratch} />
+      <TaskCountChip tasks={tasks} working={tasksWorking} needYou={tasksNeedYou} scratch={!!session.config.isScratch} list={taskList} />
       {warm && <span className="text-[10px] leading-3 px-1.5 py-0.5 rounded border border-orange-500/40 text-orange-300 bg-orange-500/10 whitespace-nowrap" title="Kept warm: coming back to it costs a cache read, not a full re-send">🔥 {warm}</span>}
     </>
   );

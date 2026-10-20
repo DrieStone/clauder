@@ -12,6 +12,7 @@ import { TagFilter } from './Tags';
 import { FolderGroup, FolderEditor, useOpenFolders, byFolderName, SESSION_DRAG_TYPE } from './Folders';
 import { whereItStands, isCurrent } from './StatusNote';
 import { tasksByMain, projectActivity } from '../lib/projects';
+import { formatTimeAgo } from '../lib/time';
 
 /** Card dragging (into and out of folders) needs a mouse; on a phone, folders are set from the
  *  session header or the folder dialog instead. */
@@ -88,6 +89,17 @@ function classifySession(s: { lastActiveAt: string; status: string }, now: numbe
   if (age < ONE_HOUR_MS) return 'hot' as const;
   if (age < THIRTY_SIX_HOURS_MS) return 'warm' as const;
   return 'history' as const;
+}
+
+/** The hover list on a card's task count: most recently active first, one line each. */
+function taskListText(tasks: SessionState[] | undefined): string | undefined {
+  if (!tasks?.length) return undefined;
+  return [...tasks]
+    .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+    .map(t => t.waitingFor ? `⚠️ ${t.config.name} · needs you`
+      : t.status === 'working' ? `🟡 ${t.config.name} · working`
+      : `○ ${t.config.name} · ${formatTimeAgo(t.lastActiveAt)}`)
+    .join('\n');
 }
 
 export function Dashboard() {
@@ -200,6 +212,7 @@ export function Dashboard() {
         tasks={taskMap.get(session.id)?.length}
         tasksWorking={taskMap.get(session.id)?.filter(t => t.status === 'working').length}
         tasksNeedYou={taskMap.get(session.id)?.filter(t => !!t.waitingFor).length}
+        taskList={taskListText(taskMap.get(session.id))}
       />
     </div>
   );
