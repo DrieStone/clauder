@@ -58,6 +58,7 @@ ok(calls.length === 0, 'owner away 2.5h: auto warming stops');
 kw.setManual(b, 3); setAge(b, 56); await kw.tick(); await settle();
 ok(calls.some(c => c.id === b), 'by-hand 🔥 works while away');
 ok(statuses.at(-1).projects[b]?.mode === 'manual', 'status shows it', statuses.at(-1));
+ok(kw.status().sessions.includes(b) && !kw.status().sessions.includes(a), 'status names the sessions actually warm (for the 🔥 on task chips)', kw.status().sessions);
 quotaBlocked = true; calls.length = 0; setAge(b, 57); await kw.tick(); await settle();
 ok(calls.length === 0, 'no pings near the usage limit'); quotaBlocked = false;
 now += 4 * 60 * MIN; setAge(b, 55); calls.length = 0; await kw.tick(); await settle();

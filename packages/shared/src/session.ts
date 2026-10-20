@@ -618,6 +618,8 @@ export interface KeepWarmStatus {
   defaultHours: number;
   /** Projects (main session ids) being kept warm now, and until when. */
   projects: Record<string, { until: string; mode: 'manual' | 'auto' }>;
+  /** Sessions actually being kept warm now: in a warm project, with their cache still alive. */
+  sessions: string[];
   /** Pings so far, and what they cost (API-equivalent), since `since`. */
   pings: number;
   costUsd: number;

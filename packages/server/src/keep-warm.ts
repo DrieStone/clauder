@@ -160,7 +160,11 @@ export class KeepWarm {
       const w = this.warmUntil(id);
       if (w) projects[id] = { until: new Date(w.until).toISOString(), mode: w.mode };
     }
-    return { auto: this.data.auto, around: this.isAround(), defaultHours: this.data.defaultHours, projects, pings: this.data.stats.pings, costUsd: this.data.stats.costUsd, since: this.data.stats.since };
+    const now = this.now();
+    const sessions = Object.keys(projects).length
+      ? this.deps.sessions().filter(s => projects[s.projectId] && now - Math.max(s.lastActiveMs, this.lastPing.get(s.id) ?? 0) < CACHE_MS).map(s => s.id)
+      : [];
+    return { auto: this.data.auto, around: this.isAround(), defaultHours: this.data.defaultHours, projects, sessions, pings: this.data.stats.pings, costUsd: this.data.stats.costUsd, since: this.data.stats.since };
   }
 
   /** Tell the browsers, when something they show changed. */

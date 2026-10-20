@@ -20,7 +20,7 @@ export function StatusDot({ s, unread }: { s: SessionState; unread: boolean }) {
 
 /** The buttons for a project's sessions. Rename and delete are offered on the current one when
  *  `onRename` / `onDelete` are given (the owner's view; a guest only switches). */
-export function TaskChips({ main, tasks, activeId, onSelect, isUnread, onRename, onDelete }: {
+export function TaskChips({ main, tasks, activeId, onSelect, isUnread, onRename, onDelete, warm }: {
   main: SessionState;
   tasks: SessionState[];
   activeId: string;
@@ -28,6 +28,8 @@ export function TaskChips({ main, tasks, activeId, onSelect, isUnread, onRename,
   isUnread: (s: SessionState) => boolean;
   onRename?: (id: string, name: string) => void;
   onDelete?: (task: SessionState) => void;
+  /** Sessions being kept warm (keep-warm.ts), for a 🔥 on their chip. */
+  warm?: Set<string>;
 }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [value, setValue] = useState('');
@@ -64,6 +66,7 @@ export function TaskChips({ main, tasks, activeId, onSelect, isUnread, onRename,
             >
               <StatusDot s={s} unread={!active && isUnread(s)} />
               <span className="truncate">{isMain ? 'Main' : s.config.name}</span>
+              {warm?.has(s.id) && <span className="text-[10px] shrink-0" title="Kept warm: coming back to it costs a cache read, not a full re-send">🔥</span>}
             </button>
             {active && onRename && (
               <button
@@ -157,6 +160,7 @@ export function ProjectTaskBar({ session, onSwitchSession }: { session: SessionS
             isUnread={isUnread}
             onRename={(id, n) => renameSession(id, n)}
             onDelete={remove}
+            warm={new Set(state.keepWarm?.sessions ?? [])}
           />
         )}
         <button

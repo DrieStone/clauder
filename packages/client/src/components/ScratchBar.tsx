@@ -95,6 +95,7 @@ export function ScratchBar({ session, onSwitchSession }: { session: SessionState
           <StatusDot s={c} unread={!active && isUnread(c)} />
           {c.config.keep && <span className="text-amber-300 text-[10px]" aria-label="Kept">★</span>}
           <span className={`truncate ${hasConversation(c) ? '' : 'italic'}`}>{c.config.name}</span>
+          {state.keepWarm?.sessions.includes(c.id) && <span className="text-[10px] shrink-0" title="Kept warm">🔥</span>}
         </button>
         {active && (
           <>
