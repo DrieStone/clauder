@@ -141,9 +141,9 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     gets `crossRelayNote` (`author.crossProject`); a whitelisted sender gets `canMessageNote` on each
     message, never in its system prompt.
   - `keep-warm.ts` — keeps prompt caches from expiring (a cold resume re-sends the whole
-    conversation: $6-12 on big Opus sessions, 266 times in Oct 1-20). A project is warm automatically
-    for 3h after the owner writes in it while they're "around" (any non-heartbeat WS message in the
-    last 2h), or by hand via the header's 🔥 (3h default, 1h, until 11 PM). Each still-warm session in
+    conversation: $6-12 on big Opus sessions, 266 times in Oct 1-20). Every session (main or task) is warm
+    automatically for 3h after its last real turn, owner around or not (on by default, saved as
+    `autoAll`), or a whole project by hand via the header's 🔥 (3h default, 1h, until 11 PM). Each still-warm session in
     it (last call 54-60 min ago) gets `ManagedSession.keepWarmPing`: a low-effort turn on its own model
     and conversation, run with broadcast silenced and the chat, lastActiveAt, status and any wakeup put
     back, so it leaves no trace; already-cold sessions aren't pinged. Never on API credits, never at

@@ -43,7 +43,7 @@ export function KeepWarmButton({ session }: { session: SessionState }) {
         onContextMenu={(e) => { e.preventDefault(); setOpen(o => !o); }}
         className={`text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap ${w ? 'text-orange-300 border-orange-500/40 bg-orange-500/10' : 'text-gray-500 border-gray-700 hover:text-gray-300'}`}
         title={w
-          ? `Kept warm ${w.mode === 'auto' ? 'automatically while you\'re around' : `until ${new Date(w.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}: a tiny hidden turn just before the cache expires, so coming back costs a cache read, not a full re-send. Click for options.`
+          ? `Kept warm ${w.mode === 'auto' ? 'automatically (3 hours after its last turn)' : `until ${new Date(w.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}: a tiny hidden turn just before the cache expires, so coming back costs a cache read, not a full re-send. Click for options.`
           : `Keep this project warm for ${hours} hours, so coming back to it doesn't re-send the whole conversation. Right-click for options.`}
       >
         🔥{w ? ` ${warmLabel(w.until, w.mode)}` : ''}
@@ -51,7 +51,7 @@ export function KeepWarmButton({ session }: { session: SessionState }) {
       {open && (
         <div className="absolute right-0 top-full mt-1 z-50 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-2 space-y-1 text-xs text-gray-300">
           <div className="px-1 pb-1 text-[11px] text-gray-400">
-            {w ? (w.mode === 'auto' ? 'Warm automatically while you\'re around.' : `Warm until ${new Date(w.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`) : 'Not being kept warm.'}
+            {w ? (w.mode === 'auto' ? 'Warm automatically: each session stays warm for 3 hours after its last turn.' : `Warm until ${new Date(w.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`) : 'Not being kept warm.'}
           </div>
           {[1, 3].map(h => (
             <button key={h} onClick={() => { setKeepWarm(projectId, h); setOpen(false); }} className="w-full text-left px-2 py-1.5 rounded hover:bg-gray-700/60">Keep warm for {h} hour{h === 1 ? '' : 's'}</button>
@@ -62,7 +62,7 @@ export function KeepWarmButton({ session }: { session: SessionState }) {
           )}
           <label className="flex items-start gap-2 px-1 pt-1 border-t border-gray-700 cursor-pointer">
             <input type="checkbox" checked={kw.auto} onChange={(e) => setKeepWarmAuto(e.target.checked)} className="mt-0.5 accent-orange-500" />
-            <span>Keep projects I'm working on warm while I'm around <span className="text-gray-500">(every project)</span></span>
+            <span>Keep every session warm for 3 hours after its last turn <span className="text-gray-500">(every project and task)</span></span>
           </label>
           <div className="px-1 text-[10px] text-gray-500">{kw.pings} ping{kw.pings === 1 ? '' : 's'} so far, about ${kw.costUsd.toFixed(2)} at API rates</div>
         </div>
