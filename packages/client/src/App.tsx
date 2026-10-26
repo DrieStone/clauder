@@ -43,9 +43,20 @@ function useVisualViewport(): { height: number; offsetTop: number } | null {
   return vp;
 }
 
+const IS_TOUCH_SCREEN = typeof window !== 'undefined' && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
+
 function AppContent() {
   const { state, setActiveSession, showSearch, openSearch, closeSearch, markSessionRead, openScratch, showApiCredits, closeApiCredits } = useSessions();
   const viewport = useVisualViewport();
+  // Typing on a phone: the keyboard takes about half the screen, so the session view drops its tab
+  // strip, header, Chat/Files tabs and task bar (`kb-hide`) and caps the message box (`kb-textarea`)
+  // to leave room for the conversation (styles/globals.css).
+  const keyboardOpen = IS_TOUCH_SCREEN && viewport !== null && viewport.height < window.innerHeight - 150;
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('kb-open', keyboardOpen);
+    if (viewport) root.style.setProperty('--vvh', `${viewport.height}px`);
+  }, [keyboardOpen, viewport]);
   const activeSession = state.activeSessionId
     ? state.sessions.get(state.activeSessionId) ?? null
     : null;

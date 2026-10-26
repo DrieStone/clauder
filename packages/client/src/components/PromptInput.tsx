@@ -450,7 +450,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={isWorking ? 'Queue a message...' : IS_TOUCH ? 'Type a message... (tap Send)' : 'Type a message or paste an image... (Enter to send, / for skills)'}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-base sm:text-sm text-gray-100 placeholder-gray-500 resize-none focus:outline-none focus:border-blue-500 min-h-[40px] max-h-[50vh] overflow-y-auto"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-base sm:text-sm text-gray-100 placeholder-gray-500 resize-none focus:outline-none focus:border-blue-500 min-h-[40px] max-h-[50vh] overflow-y-auto kb-textarea"
               rows={1}
             />
           </div>

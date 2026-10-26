@@ -239,7 +239,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   return (
     <div className="flex flex-col flex-1 min-h-0">
       {/* Session switcher tabs */}
-      <div className="flex items-center bg-gray-900 border-b border-gray-800 shrink-0 overflow-x-auto">
+      <div className="kb-hide flex items-center bg-gray-900 border-b border-gray-800 shrink-0 overflow-x-auto">
         <button
           onClick={onBack}
           className="min-h-[44px] px-4 text-gray-500 hover:text-gray-200 text-sm transition-colors shrink-0 border-r border-gray-800 flex items-center"
@@ -386,7 +386,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
 
       {/* Header. Phone: row 1 = name + status + actions, row 2 = model/goal/tags — the same three
           groups, reflowed with order-*. sm+: a single row, as before. */}
-      <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1.5 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 border-b border-gray-800 bg-gray-900/50 shrink-0">
+      <div className="kb-hide flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1.5 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 border-b border-gray-800 bg-gray-900/50 shrink-0">
         <div className="order-1 flex-1 sm:flex-initial sm:max-w-[40%] min-w-0 flex items-center gap-2">
           {isScratchConversation ? (
             <span className="text-sm text-amber-500/80 shrink-0">Scratch ›</span>
@@ -502,7 +502,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
       </div>
 
       {/* Tab bar */}
-      <div className="flex border-b border-gray-800 shrink-0 overflow-x-auto">
+      <div className="kb-hide flex border-b border-gray-800 shrink-0 overflow-x-auto">
         <button
           onClick={() => setActiveTab('chat')}
           className={`shrink-0 px-3 sm:px-4 py-3 min-h-[44px] text-xs font-medium whitespace-nowrap transition-colors ${
@@ -687,9 +687,11 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           )}
 
           {/* The project's tasks, or Scratch's conversations: switch, or start one */}
-          {inScratch(session)
-            ? <ScratchBar session={session} onSwitchSession={onSwitchSession} />
-            : <ProjectTaskBar session={session} onSwitchSession={onSwitchSession} />}
+          <div className="kb-hide shrink-0">
+            {inScratch(session)
+              ? <ScratchBar session={session} onSwitchSession={onSwitchSession} />
+              : <ProjectTaskBar session={session} onSwitchSession={onSwitchSession} />}
+          </div>
 
           {/* Input */}
           <PromptInput
