@@ -10,28 +10,19 @@ import { formatTimeAgo } from '../lib/time';
 /** dataTransfer type for a session card dragged onto a folder (desktop only). */
 export const SESSION_DRAG_TYPE = 'application/x-clauder-session';
 
-const OPEN_KEY = 'clauder.dashboard.openFolders';
+const VIEW_KEY = 'clauder.dashboard.view';
 
-/** Which folders are open on the dashboard. Kept per device, since a phone and a desktop want
- *  different things open. Folders start closed: tidying up is the point. */
-export function useOpenFolders(): [Set<string>, (id: string) => void] {
-  const [open, setOpen] = useState<Set<string>>(() => {
-    try {
-      const ids = JSON.parse(localStorage.getItem(OPEN_KEY) ?? '[]');
-      return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []);
-    } catch {
-      return new Set();
-    }
+/** What the dashboard lists: sessions in no folder ('loose', the default), every session ('all'),
+ *  or one folder's (its id). Kept per device; a folder that's gone falls back to 'loose'. */
+export function useDashboardView(folders: SessionFolder[]): [string, (view: string) => void] {
+  const [view, setView] = useState<string>(() => {
+    try { return localStorage.getItem(VIEW_KEY) || 'loose'; } catch { return 'loose'; }
   });
   useEffect(() => {
-    try { localStorage.setItem(OPEN_KEY, JSON.stringify([...open])); } catch { /* storage unavailable */ }
-  }, [open]);
-  const toggle = useCallback((id: string) => setOpen(prev => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  }), []);
-  return [open, toggle];
+    try { localStorage.setItem(VIEW_KEY, view); } catch { /* storage unavailable */ }
+  }, [view]);
+  const known = view === 'loose' || view === 'all' || folders.some(f => f.id === view);
+  return [known ? view : 'loose', setView];
 }
 
 export const byFolderName = (a: SessionFolder, b: SessionFolder) =>
@@ -45,132 +36,84 @@ const PencilIcon = () => (
   </svg>
 );
 
-// ─── A folder on the dashboard ──────────────────────────────────────────────────
+// ─── The folder bar on the dashboard ────────────────────────────────────────────
 
-type Attention = 'needs' | 'working' | 'unread';
-const ATTENTION: Record<Attention, { label: string; chip: string; dot: string }> = {
-  needs: { label: 'Needs you', chip: 'border-amber-500/40 bg-amber-500/10 text-amber-300', dot: 'bg-amber-400 animate-pulse' },
-  working: { label: 'Working', chip: 'border-amber-700/40 text-amber-200/90', dot: 'bg-amber-500 animate-pulse' },
-  unread: { label: 'Unread', chip: 'border-blue-700/50 text-blue-200', dot: 'bg-red-500' },
-};
-const ATTENTION_ORDER: Attention[] = ['needs', 'working', 'unread'];
-const MAX_CHIPS = 3;
+export interface FolderBarItem {
+  /** 'loose', 'all', or a folder id. */
+  view: string;
+  label: string;
+  icon: string;
+  count: number;
+  needs: number;
+  working: number;
+  unread: number;
+  /** Where a card dropped here goes: a folder id, null (out of its folder), or undefined (no drop). */
+  dropTo?: string | null;
+  folder?: SessionFolder;
+}
 
-/** One folder: a header that opens and closes it, and, open, its sessions drawn like the main list
- *  (`recent` as cards, `older` as rows, both via the dashboard's `renderCard`). Closed, the header
- *  still names any session that needs you, is working, or has unread messages, one click from
- *  opening it. A session card dragged onto the folder moves into it. */
-export function FolderGroup({ folder, recent, older, open, onToggle, onEdit, onOpenSession, isUnread, renderCard, activityOf, draggingId, onDropSession }: {
-  folder: SessionFolder;
-  recent: SessionState[];
-  older: SessionState[];
-  open: boolean;
-  onToggle: () => void;
-  onEdit: () => void;
-  onOpenSession: (sessionId: string) => void;
-  isUnread: (session: SessionState) => boolean;
-  renderCard: (session: SessionState, tier: 'warm' | 'history') => ReactNode;
-  /** A card's state as a whole, for a project with tasks: working or needing you if any of its
-   *  sessions is, unread if any is. Defaults to the session's own. */
-  activityOf?: (session: SessionState) => { status: string; waitingFor: string | null; lastActiveAt: string; unread: boolean };
-  /** The session card being dragged, if any. */
+/** One row of tiles that picks what the dashboard lists: "No folder", each folder, and "All". Each
+ *  tile counts its sessions and shows how many need you, are working, or are unread, so a folder
+ *  never has to be opened to see that. A card dragged onto a tile moves into that folder ("No
+ *  folder" takes it out). The open folder's tile has a pencil to rename it or change its sessions. */
+export function FolderBar({ items, view, onSelect, onEdit, draggingId, draggingFrom, onDropSession }: {
+  items: FolderBarItem[];
+  view: string;
+  onSelect: (view: string) => void;
+  onEdit: (folder: SessionFolder) => void;
   draggingId: string | null;
-  onDropSession: (folderId: string) => void;
+  /** The folder the dragged card is in (null: none). */
+  draggingFrom: string | null;
+  onDropSession: (folderId: string | null) => void;
 }) {
-  const [dropHover, setDropHover] = useState(false);
-  const canDrop = !!draggingId && !folder.sessionIds.includes(draggingId);
-  useEffect(() => { if (!draggingId) setDropHover(false); }, [draggingId]);
-
-  const sessions = [...recent, ...older];
-  const stateOf = activityOf ?? ((s: SessionState) => ({ status: s.status, waitingFor: s.waitingFor, lastActiveAt: s.lastActiveAt, unread: isUnread(s) }));
-  const attention = sessions
-    .map(s => { const a = stateOf(s); return { s, kind: (a.waitingFor ? 'needs' : a.status === 'working' ? 'working' : a.unread ? 'unread' : null) as Attention | null }; })
-    .filter((a): a is { s: SessionState; kind: Attention } => a.kind !== null)
-    .sort((a, b) => ATTENTION_ORDER.indexOf(a.kind) - ATTENTION_ORDER.indexOf(b.kind));
-  const lastActive = sessions.reduce<string | null>((latest, s) => {
-    const at = stateOf(s).lastActiveAt;
-    return !latest || Date.parse(at) > Date.parse(latest) ? at : latest;
-  }, null);
-
-  const onDragOver = (e: DragEvent) => {
-    if (!canDrop) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    setDropHover(true);
-  };
-  const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropHover(false);
-  };
-  const onDrop = (e: DragEvent) => {
-    if (!canDrop) return;
-    e.preventDefault();
-    setDropHover(false);
-    onDropSession(folder.id);
-  };
-
-  const border = dropHover ? 'border-blue-500 bg-blue-950/20'
-    : canDrop ? 'border-dashed border-gray-600 bg-gray-900/40'
-    : attention.some(a => a.kind === 'needs') && !open ? 'border-amber-700/50 bg-gray-900/40'
-    : 'border-gray-800 bg-gray-900/40';
-
+  const [dropHover, setDropHover] = useState<string | null>(null);
+  useEffect(() => { if (!draggingId) setDropHover(null); }, [draggingId]);
   return (
-    <div onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} className={`rounded-xl border transition-colors ${border}`}>
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        onClick={onToggle}
-        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onToggle(); } }}
-        className="group flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2.5 cursor-pointer select-none"
-      >
-        <svg className={`w-3 h-3 shrink-0 text-gray-500 transition-transform ${open ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
-        </svg>
-        <span className="text-sm leading-none shrink-0" aria-hidden>📁</span>
-        <h3 className="text-sm font-medium text-gray-200 group-hover:text-white truncate min-w-0 max-w-[60%]">{folder.name}</h3>
-        <span className="text-xs text-gray-500 shrink-0" title={`${sessions.length} session${sessions.length !== 1 ? 's' : ''}`}>{sessions.length}</span>
-        {!open && attention.slice(0, MAX_CHIPS).map(({ s, kind }) => (
-          <button
-            key={s.id}
-            onClick={(e) => { e.stopPropagation(); onOpenSession(s.id); }}
-            className={`inline-flex items-center gap-1 min-w-0 max-w-[12rem] text-[11px] leading-4 px-1.5 py-0.5 rounded border hover:brightness-125 ${ATTENTION[kind].chip}`}
-            title={`${ATTENTION[kind].label}: ${s.config.name}`}
+    <div className="flex gap-2 overflow-x-auto -mx-3 px-3 pb-1 sm:mx-0 sm:px-0 sm:pb-0 sm:flex-wrap sm:overflow-visible" role="tablist" aria-label="Show sessions">
+      {items.map(item => {
+        const selected = item.view === view;
+        const canDrop = !!draggingId && item.dropTo !== undefined && item.dropTo !== draggingFrom;
+        return (
+          <div
+            key={item.view}
+            role="tab"
+            aria-selected={selected}
+            tabIndex={0}
+            onClick={() => onSelect(item.view)}
+            onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(item.view); } }}
+            onDragOver={(e: DragEvent) => { if (!canDrop) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropHover(item.view); }}
+            onDragLeave={(e: DragEvent<HTMLDivElement>) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropHover(null); }}
+            onDrop={(e: DragEvent) => { if (!canDrop) return; e.preventDefault(); setDropHover(null); onDropSession(item.dropTo ?? null); }}
+            className={`group inline-flex items-center gap-1.5 shrink-0 sm:shrink sm:min-w-0 max-w-full px-3 py-1.5 rounded-lg border text-sm cursor-pointer select-none transition-colors ${
+              dropHover === item.view ? 'border-blue-500 bg-blue-950/30'
+              : canDrop ? 'border-dashed border-gray-500'
+              : selected ? 'border-gray-500 bg-gray-800 text-white'
+              : item.needs ? 'border-amber-700/50 bg-gray-900/40 text-gray-300 hover:border-gray-600'
+              : 'border-gray-800 bg-gray-900/40 text-gray-400 hover:border-gray-600 hover:text-gray-200'}`}
+            title={[`${item.count} session${item.count !== 1 ? 's' : ''}`,
+              item.needs ? `${item.needs} need${item.needs === 1 ? 's' : ''} you` : '',
+              item.working ? `${item.working} working` : '',
+              item.unread ? `${item.unread} unread` : ''].filter(Boolean).join(' · ')}
           >
-            <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${ATTENTION[kind].dot}`} />
-            <span className="truncate">{s.config.name}</span>
-          </button>
-        ))}
-        {!open && attention.length > MAX_CHIPS && (
-          <span className="text-[11px] text-gray-500 shrink-0">+{attention.length - MAX_CHIPS} more</span>
-        )}
-        <span className="ml-auto flex items-center gap-2 shrink-0">
-          {lastActive && <span className="text-xs text-gray-600">{formatTimeAgo(lastActive)}</span>}
-          <button
-            onClick={(e) => { e.stopPropagation(); onEdit(); }}
-            className="p-1 -m-1 text-gray-600 hover:text-gray-300 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus:opacity-100 transition-opacity"
-            title="Rename this folder or change its sessions"
-            aria-label={`Edit folder ${folder.name}`}
-          >
-            <PencilIcon />
-          </button>
-        </span>
-      </div>
-
-      {open && (
-        <div className="px-3 pb-3 space-y-3">
-          {sessions.length === 0 ? (
-            <div className="text-xs text-gray-600 px-1 pb-1">
-              Nothing in here yet.{' '}
-              <button onClick={onEdit} className="text-blue-400 hover:text-blue-300">Add sessions</button>
-            </div>
-          ) : (
-            <>
-              {recent.length > 0 && <div className="grid grid-cols-1 active-grid gap-3">{recent.map(s => renderCard(s, 'warm'))}</div>}
-              {older.length > 0 && <div className="grid grid-cols-1 history-grid gap-2">{older.map(s => renderCard(s, 'history'))}</div>}
-            </>
-          )}
-        </div>
-      )}
+            <span aria-hidden className="shrink-0">{item.icon}</span>
+            <span className="truncate">{item.label}</span>
+            <span className="text-xs text-gray-500 shrink-0">{item.count}</span>
+            {item.needs > 0 && <span className="shrink-0 text-[10px] leading-3 px-1 py-0.5 rounded bg-amber-500/20 text-amber-300">{item.needs}</span>}
+            {item.working > 0 && <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />}
+            {item.unread > 0 && <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-red-500" />}
+            {selected && item.folder && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onEdit(item.folder!); }}
+                className="ml-0.5 p-1 -m-1 text-gray-500 hover:text-gray-200"
+                title="Rename this folder or change its sessions"
+                aria-label={`Edit folder ${item.label}`}
+              >
+                <PencilIcon />
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

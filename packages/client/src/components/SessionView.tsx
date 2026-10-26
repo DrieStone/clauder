@@ -22,6 +22,7 @@ import { ProjectTaskBar } from './ProjectTasks';
 import { ScratchBar } from './ScratchBar';
 import { KeepWarmButton } from './KeepWarm';
 import { projectIdOf, isTask, tasksByMain, projectActivity } from '../lib/projects';
+import { rememberOpen, sessionToOpen } from '../lib/lastOpen';
 import { inScratch, noteScratchSeen } from '../lib/scratch';
 import { RichMarkdown } from './RichMarkdown';
 
@@ -39,9 +40,6 @@ interface SessionViewProps {
   draft: string;
   onDraftChange: (v: string) => void;
 }
-
-/** The session last open in each project (by main session id), so its tab returns you there. */
-const lastInProject = new Map<string, string>();
 
 export function SessionView({ session, allSessions, onBack, onSwitchSession, draft, onDraftChange }: SessionViewProps) {
   const { sendMessage, interruptSession, resetSession, setModel, setEffort, renameSession, generateSummary, respondToPermission, dequeueMessage, cancelWakeup, respondToPlan, setPinned, setTabClosed, setPinOrder, isUnread, logEvent, stopMonitor, state, openSearch, scrollToMessageId, setScrollToMessageId, requestHistory, refreshSkills, spinOffTask, openScratch, apiCreditsNow, openApiCredits } = useSessions();
@@ -85,7 +83,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   const projectId = projectIdOf(session);
   const projectMain = state.sessions.get(projectId) ?? session;
   const shareCount = state.shares.filter(s => s.sessionId === projectId).length;
-  useEffect(() => { lastInProject.set(projectId, session.id); }, [projectId, session.id]);
+  useEffect(() => { rememberOpen(session); }, [projectId, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
   // Which Scratch conversation is open here, and when it was last looked at (lib/scratch.ts).
   const isScratchConversation = !!session.config.scratchConversation;
   useEffect(() => {
@@ -281,10 +279,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           const isActiveTab = s.id === projectId;
           const taskCount = taskMap.get(s.id)?.length ?? 0;
           // Back to the session you were last in on this project, if it's still there.
-          const openTab = () => {
-            const last = lastInProject.get(s.id);
-            onSwitchSession(last && allSessions.some(x => x.id === last && projectIdOf(x) === s.id) ? last : s.id);
-          };
+          const openTab = () => onSwitchSession(sessionToOpen(s.id, state.sessions));
           const schedTitle = [
             tabSched > 0 ? `${tabSched} scheduled task${tabSched !== 1 ? 's' : ''}` : '',
             tabWakeup ? 'auto-wakeup pending' : '',

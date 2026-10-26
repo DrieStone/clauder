@@ -155,10 +155,12 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     reference tags by id in `SessionConfig.tags`; deleting a tag cascades via
     `SessionManager.removeTagFromAllSessions`.
   - `folders.ts` — `FolderManager`: dashboard folders, named groups of sessions that only tidy the
-    dashboard (client `Folders.tsx`). TagManager-style, persisted to `~/.clauder/folders.json`, full
+    dashboard (client `Folders.tsx`): a bar of tiles ("No folder" by default, each folder, "All")
+    picks what the dashboard lists, each tile counting what needs you, is working or is unread. TagManager-style, persisted to `~/.clauder/folders.json`, full
     `folders_registry` snapshot on any change (owners only). Membership lives in the folder, not on
     SessionConfig, so sessions.json is untouched; a session is in at most one folder, Scratch in none.
-    A closed folder's header names any session inside that needs you, is working, or is unread.
+    Reopening Clauder lands in the session last open on that device, and a project's tab or card
+    returns to the task last open in it (client `lib/lastOpen.ts`, localStorage).
   - `status-reports.ts` — `StatusReportManager`: once a session has been idle `STATUS_IDLE_DAYS`
     (15), an hourly sweep writes a status note (where it stands, last worked on, open threads) with
     one tool-less `runClaudeOneShot` call (Sonnet, low effort, in the project's folder) on Clauder's
@@ -350,7 +352,7 @@ tail -f ~/.clauder/clauder.log
 - The CLI deletes transcripts idle past cleanupPeriodDays (default 30; ~/.claude/settings.json sets 90); resuming one then fails with No conversation found
 - ANTHROPIC_API_KEY is unset in prod, so task-classifier.ts auto-compact (a direct API call) silently no-ops; make out-of-band LLM calls through the CLI instead (runClaudeOneShot in claude-oneshot.ts)
 - With an API key active the CLI disables claude.ai connectors, and a refused key makes it retry for minutes emitting api_retry events
-- Beyond hard rule 10's files, model IDs are hardcoded in SCRATCH_MODEL (index.ts), SCRATCH_CONVERSATION_MODEL (shared session.ts), DEFAULT_EXECUTOR_MODEL (project-runner.ts), CLAUDE_CODE_SUBAGENT_MODEL (session.ts) and ProjectTasks.tsx, so grep for the old ID when changing one. CLAUDE_CODE_SUBAGENT_MODEL only covers sub-agents launched without a model; named models and built-in Explore bypass it
+- Model IDs are also hardcoded well outside hard rule 10's files: defaults like SCRATCH_MODEL, SCRATCH_CONVERSATION_MODEL, DEFAULT_EXECUTOR_MODEL, SMART_MODEL (search.ts) and CLAUDE_CODE_SUBAGENT_MODEL, plus one-off calls (task close, task classifier, API-credit Fable fallback, ProjectTasks.tsx), so grep packages/*/src for the old ID when changing one. CLAUDE_CODE_SUBAGENT_MODEL only covers sub-agents launched without a model; named models and built-in Explore bypass it
 - There is no local price table: per-model cost comparisons come from ~/.clauder/cost-ledger.json, and to re-price its turns from tokens, charge cache writes at 2x input and count thinking inside output. Per Mtok, Opus 5.5 is $4/$20 with $0.20 cache reads and Sonnet 5.5 is $2/$10; cache reads dominate long agentic turns
 - Sessions are child processes of the Clauder server, so restarting it from inside one kills that session mid-turn (looks like a random "interruption"). Test on a throwaway server instead: HOME=/tmp/x PORT=3999 node packages/server/dist/index.js. Its CLI isn't logged in (replies Not logged in, model synthetic), so it makes no real Claude calls; before copying sessions.json into its HOME, strip goal, modelPlan, pendingWakeup and monitors so restore can't start turns. lsof can't see listeners from inside a session, and a grep-based kill can match your own shell
 - To test without a real CLI: fake-CLI harnesses live in packages/server/test-harness (run with node after npm run build; keep them there, since macOS cleanup wipes /tmp), and UI states can be faked by wrapping window.WebSocket via CDP addScriptToEvaluateOnNewDocument and dispatching fake MessageEvents

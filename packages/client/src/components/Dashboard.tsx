@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type DragEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, type DragEvent } from 'react';
 import type { SessionState, SessionFolder } from '@clauder/shared';
 import { useSessions } from '../context/SessionContext';
 import { warmLabel } from './KeepWarm';
@@ -9,10 +9,11 @@ import { PauseControls } from './PauseBar';
 import { SchedulerModal } from './SchedulerModal';
 import { NotificationToggle } from './NotificationToggle';
 import { TagFilter } from './Tags';
-import { FolderGroup, FolderEditor, useOpenFolders, byFolderName, SESSION_DRAG_TYPE } from './Folders';
+import { FolderBar, FolderEditor, useDashboardView, byFolderName, SESSION_DRAG_TYPE, type FolderBarItem } from './Folders';
 import { whereItStands, isCurrent } from './StatusNote';
 import { tasksByMain, projectActivity } from '../lib/projects';
 import { formatTimeAgo } from '../lib/time';
+import { sessionToOpen } from '../lib/lastOpen';
 
 /** Card dragging (into and out of folders) needs a mouse; on a phone, folders are set from the
  *  session header or the folder dialog instead. */
@@ -107,13 +108,17 @@ export function Dashboard() {
   const [showNewSession, setShowNewSession] = useState(false);
   const [showScheduler, setShowScheduler] = useState(false);
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
-  const [openFolders, toggleFolder] = useOpenFolders();
+  const [view, setView] = useDashboardView(state.folders);
   const [folderEditor, setFolderEditor] = useState<SessionFolder | 'new' | null>(null);
-  /** The session card being dragged, and whether it's over the main list (to leave its folder). */
+  /** The session card being dragged (onto a folder tile). */
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [overMainList, setOverMainList] = useState(false);
   const dragStartTimer = useRef<number | null>(null);
   const [, setTick] = useState(0);
+  // Opening a project returns to the task last open in it (lib/lastOpen.ts). Stable, through a ref
+  // to the sessions, so the cards' memo holds.
+  const sessionsRef = useRef(state.sessions);
+  sessionsRef.current = state.sessions;
+  const openProject = useCallback((id: string) => setActiveSession(sessionToOpen(id, sessionsRef.current)), [setActiveSession]);
 
   // Re-render every 30s so tier classification and "X ago" labels stay fresh
   useEffect(() => {
@@ -153,36 +158,42 @@ export function Dashboard() {
     tagFilter.size === 0 || (s.config.tags ?? []).some(t => tagFilter.has(t));
   const visible = sessions.filter(matchesTags);
 
-  // A session in a folder shows only inside it; a closed folder's header still names any that
-  // need you, are working, or have unread messages.
+  // The folder bar picks what's listed: sessions in no folder (the default), one folder's, or all.
+  // A session is in at most one folder.
   const folderOf = new Map<string, string>();
   for (const f of state.folders) for (const id of f.sessionIds) if (!folderOf.has(id)) folderOf.set(id, f.id);
   const loose = visible.filter(s => !folderOf.has(s.id));
+  const shown = view === 'all' ? visible : view === 'loose' ? loose : visible.filter(s => folderOf.get(s.id) === view);
 
-  const hotSessions = loose.filter(s => s.config.isScratch || classifySession(act(s), now) === 'hot' || !!act(s).waitingFor).sort(byNeedsYouThenName);
-  const warmSessions = loose.filter(s => !s.config.isScratch && !act(s).waitingFor && classifySession(act(s), now) === 'warm').sort(byRecent);
-  const historySessions = loose.filter(s => !s.config.isScratch && !act(s).waitingFor && classifySession(act(s), now) === 'history').sort(byRecent);
+  const hotSessions = shown.filter(s => s.config.isScratch || classifySession(act(s), now) === 'hot' || !!act(s).waitingFor).sort(byNeedsYouThenName);
+  const warmSessions = shown.filter(s => !s.config.isScratch && !act(s).waitingFor && classifySession(act(s), now) === 'warm').sort(byRecent);
+  const historySessions = shown.filter(s => !s.config.isScratch && !act(s).waitingFor && classifySession(act(s), now) === 'history').sort(byRecent);
 
-  // Inside a folder, the same split without the headings: recent and waiting sessions as cards
-  // (needs-you first, then by name, like Active), older ones as rows (newest first, like History).
-  // While a tag filter is on, folders open and show only matches; ones with none are hidden.
-  const filtering = tagFilter.size > 0;
-  const isOld = (s: SessionState) => !act(s).waitingFor && classifySession(act(s), now) === 'history';
-  const folderGroups = [...state.folders].sort(byFolderName).map(folder => {
-    const members = visible.filter(s => folderOf.get(s.id) === folder.id);
-    return {
-      folder,
-      recent: members.filter(s => !isOld(s)).sort(byNeedsYouThenName),
-      older: members.filter(isOld).sort(byRecent),
-    };
-  }).filter(g => !filtering || g.recent.length + g.older.length > 0);
+  // Each tile counts what needs you, is working, or is unread, a project's tasks included.
+  const tally = (list: SessionState[]) => {
+    let needs = 0, working = 0, unread = 0;
+    for (const s of list) {
+      const a = act(s);
+      if (a.waitingFor) needs++;
+      else if (a.status === 'working') working++;
+      else if ([s, ...(taskMap.get(s.id) ?? [])].some(isUnread)) unread++;
+    }
+    return { count: list.length, needs, working, unread };
+  };
+  const folderItems: FolderBarItem[] = state.folders.length === 0 ? [] : [
+    { view: 'loose', label: 'No folder', icon: '🏠', dropTo: null, ...tally(loose) },
+    ...[...state.folders].sort(byFolderName).map(folder => ({
+      view: folder.id, label: folder.name, icon: '📁', dropTo: folder.id, folder,
+      ...tally(visible.filter(s => folderOf.get(s.id) === folder.id)),
+    })),
+    { view: 'all', label: 'All', icon: '🗂', ...tally(visible) },
+  ];
+  const viewFolder = state.folders.find(f => f.id === view);
 
-  // Drag a card onto a folder to move it in, or from a folder onto the main list to take it out.
-  const draggingFromFolder = !!draggingId && folderOf.has(draggingId);
+  // Drag a card onto a folder tile to move it in, or onto "No folder" to take it out.
   const endDrag = () => {
     if (dragStartTimer.current !== null) { clearTimeout(dragStartTimer.current); dragStartTimer.current = null; }
     setDraggingId(null);
-    setOverMainList(false);
   };
   // A dormant project's ⓘ previews where it stands, from its status note.
   const noteFor = (s: SessionState) => {
@@ -206,7 +217,7 @@ export function Dashboard() {
         session={session}
         tier={tier}
         unread={isUnread(session)}
-        onOpen={session.config.isScratch ? openScratch : setActiveSession}
+        onOpen={session.config.isScratch ? openScratch : openProject}
         statusNote={noteFor(session)}
         warm={state.keepWarm?.projects[session.id] ? warmLabel(state.keepWarm.projects[session.id].until, state.keepWarm.projects[session.id].mode) : undefined}
         tasks={taskMap.get(session.id)?.length}
@@ -216,24 +227,6 @@ export function Dashboard() {
       />
     </div>
   );
-  const mainListDrop = {
-    onDragOver: (e: DragEvent) => {
-      if (!draggingFromFolder) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      setOverMainList(true);
-    },
-    onDragLeave: (e: DragEvent<HTMLDivElement>) => {
-      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOverMainList(false);
-    },
-    onDrop: (e: DragEvent) => {
-      if (!draggingFromFolder || !draggingId) return;
-      e.preventDefault();
-      moveToFolder(draggingId, null);
-      endDrag();
-    },
-  };
-
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden">
       <div className="p-3 sm:p-6 w-full min-w-0">
@@ -320,43 +313,29 @@ export function Dashboard() {
           </div>
         ) : (
           <div className="space-y-8">
-            {/* Folders: closed by default; open ones show their sessions like the main list */}
-            {folderGroups.length > 0 && (
-              <section>
-                <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
-                  Folders
-                  {draggingId && (
-                    <span className="ml-2 normal-case tracking-normal text-blue-400">
-                      {draggingFromFolder ? 'Drop on another folder, or on the list below to take it out' : 'Drop on a folder to move it in'}
-                    </span>
-                  )}
-                </h2>
-                <div className="space-y-2">
-                  {folderGroups.map(({ folder, recent, older }) => (
-                    <FolderGroup
-                      key={folder.id}
-                      folder={folder}
-                      recent={recent}
-                      older={older}
-                      open={filtering || openFolders.has(folder.id)}
-                      onToggle={() => toggleFolder(folder.id)}
-                      onEdit={() => { logEvent('folder_editor_open', { isNew: false }); setFolderEditor(folder); }}
-                      onOpenSession={setActiveSession}
-                      isUnread={isUnread}
-                      activityOf={(s) => ({ ...act(s), unread: [s, ...(taskMap.get(s.id) ?? [])].some(isUnread) })}
-                      renderCard={renderCard}
-                      draggingId={draggingId}
-                      onDropSession={(folderId) => { if (draggingId) moveToFolder(draggingId, folderId); endDrag(); }}
-                    />
-                  ))}
-                </div>
+            {/* Folder bar: what's listed below */}
+            {folderItems.length > 0 && (
+              <section className="space-y-2">
+                <FolderBar
+                  items={folderItems}
+                  view={view}
+                  onSelect={setView}
+                  onEdit={(f) => { logEvent('folder_editor_open', { isNew: false }); setFolderEditor(f); }}
+                  draggingId={draggingId}
+                  draggingFrom={draggingId ? folderOf.get(draggingId) ?? null : null}
+                  onDropSession={(folderId) => { if (draggingId) moveToFolder(draggingId, folderId); endDrag(); }}
+                />
+                {draggingId && <p className="text-xs text-blue-400">Drop on a folder to move it there, or on “No folder” to take it out</p>}
               </section>
             )}
 
-            <div
-              {...mainListDrop}
-              className={`space-y-8 rounded-xl ${draggingFromFolder ? 'min-h-16' : ''} ${overMainList ? 'outline-dashed outline-2 outline-offset-4 outline-blue-500/60' : ''}`}
-            >
+            <div className="space-y-8">
+              {viewFolder && shown.length === 0 && (
+                <div className="text-sm text-gray-500">
+                  Nothing in {viewFolder.name} yet.{' '}
+                  <button onClick={() => setFolderEditor(viewFolder)} className="text-blue-400 hover:text-blue-300">Add sessions</button>
+                </div>
+              )}
               {/* Active: compact cards sorted alphabetically */}
               {hotSessions.length > 0 && (
                 <section>

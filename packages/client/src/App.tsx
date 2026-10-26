@@ -8,6 +8,7 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { onNotificationClick, markRead } from './lib/notifications';
 import { getNonScratchSessions } from './lib/sessions';
 import { tailscaleOrigin } from './lib/hosts';
+import { lastActive } from './lib/lastOpen';
 
 /** Track the visual viewport: its height AND its offsetTop. Height alone is not enough on
  *  iOS: when the on-screen keyboard opens, iOS both (a) shrinks the visual viewport and
@@ -48,6 +49,17 @@ function AppContent() {
   const activeSession = state.activeSessionId
     ? state.sessions.get(state.activeSessionId) ?? null
     : null;
+
+  // Opening Clauder lands back in the session last open on this device (lib/lastOpen.ts), once the
+  // first session list has arrived.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current || state.sessions.size === 0) return;
+    restoredRef.current = true;
+    if (state.activeSessionId) return;
+    const last = lastActive(state.sessions);
+    if (last) setActiveSession(last);
+  }, [state.sessions, state.activeSessionId, setActiveSession]);
 
   // Persist unsent drafts per session across navigation
   const draftsRef = useRef<Map<string, string>>(new Map());
