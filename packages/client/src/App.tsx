@@ -52,7 +52,19 @@ function AppContent() {
   // Typing on a phone: the keyboard takes about half the screen, so the session view drops its tab
   // strip, header, Chat/Files tabs and task bar (`kb-hide`) and caps the message box (`kb-textarea`)
   // to leave room for the conversation (styles/globals.css).
-  const keyboardOpen = IS_TOUCH_SCREEN && viewport !== null && viewport.height < window.innerHeight - 150;
+  // The keyboard is taken to be up while a text field has focus: on iOS the page's own height can
+  // shrink along with the visible area, so comparing the two misses it.
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    if (!IS_TOUCH_SCREEN) return;
+    const isField = (el: Element | null) => !!el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && /^(text|search|email|url|password|number|tel)?$/.test((el as HTMLInputElement).type)) || (el as HTMLElement).isContentEditable);
+    const update = () => setEditing(isField(document.activeElement));
+    const later = () => setTimeout(update, 0); // focus has not moved on yet during focusout
+    document.addEventListener('focusin', update);
+    document.addEventListener('focusout', later);
+    return () => { document.removeEventListener('focusin', update); document.removeEventListener('focusout', later); };
+  }, []);
+  const keyboardOpen = IS_TOUCH_SCREEN && (editing || (viewport !== null && viewport.height < window.innerHeight - 150));
   useEffect(() => { applyCompact(); }, []);
   useEffect(() => {
     const root = document.documentElement;
@@ -170,7 +182,7 @@ function AppContent() {
 
   return (
     <div
-      className="h-dvh w-screen overflow-x-hidden flex flex-col bg-gray-950 text-gray-100"
+      className="app-root h-dvh w-screen overflow-x-hidden flex flex-col bg-gray-950 text-gray-100"
       style={{
         paddingTop: 'env(safe-area-inset-top)',
         paddingBottom: 'env(safe-area-inset-bottom)',

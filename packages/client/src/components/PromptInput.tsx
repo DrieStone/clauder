@@ -410,12 +410,12 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
         className="hidden"
         onChange={handleFileInputChange}
       />
-      <div className="flex gap-2 min-w-0 items-start">
+      <div className="composer-row flex gap-2 min-w-0 items-start">
         {!isWorking && (
           <button
             onClick={handleSkillButtonClick}
             title="Open the skill picker (or just type / in the message box)"
-            className="px-2.5 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm font-mono rounded-lg transition-colors self-start"
+            className="kb-skip px-2.5 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm font-mono rounded-lg transition-colors self-start"
           >
             /
           </button>
@@ -425,7 +425,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
           title={compact ? 'Show the tabs and header again' : 'Hide the tabs and header, to see more of the chat'}
           aria-label={compact ? 'Show the tabs and header' : 'Hide the tabs and header'}
           aria-pressed={compact}
-          className={`touch-only px-2.5 py-2 text-sm rounded-lg transition-colors self-start ${compact ? 'bg-blue-700/60 text-blue-100' : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
+          className={`touch-only kb-skip px-2.5 py-2 text-sm rounded-lg transition-colors self-start ${compact ? 'bg-blue-700/60 text-blue-100' : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
         >
           {compact ? '⤡' : '⤢'}
         </button>
@@ -443,8 +443,8 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
         {/* Textarea + action buttons: stacked on mobile (input gets a full-width line, buttons
             drop below it) so the phone input isn't squeezed; inline on desktop (sm:) as before.
             While working there's only Stop + Queue, which fit inline on a phone too (saves a row). */}
-        <div className={`flex-1 min-w-0 flex gap-2 ${isWorking ? 'flex-row items-start' : 'flex-col sm:flex-row sm:items-start'}`}>
-          <div className="relative flex-1 min-w-0">
+        <div className={`composer-inner flex-1 min-w-0 flex gap-2 ${isWorking ? 'flex-row items-start' : 'flex-col sm:flex-row sm:items-start'}`}>
+          <div className="composer-text relative flex-1 min-w-0">
             {skillsOpen && (
               <SkillDropdown
                 skills={filteredSkills}
@@ -465,7 +465,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
               rows={1}
             />
           </div>
-          <div className={`flex gap-2 items-start ${isWorking ? 'shrink-0' : 'flex-wrap justify-end sm:justify-start sm:flex-nowrap'}`}>
+          <div className={`composer-actions flex gap-2 items-start ${isWorking ? 'shrink-0' : 'flex-wrap justify-end sm:justify-start sm:flex-nowrap'}`}>
             {isWorking && (
               <button
                 onClick={onInterrupt}
