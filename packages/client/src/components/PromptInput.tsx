@@ -3,6 +3,7 @@ import { useSessions } from '../context/SessionContext';
 import type { ImageAttachment, FileAttachment, Skill, EffortLevel } from '@clauder/shared';
 import { SkillDropdown } from './SkillDropdown';
 import { MAX_IMAGES, MAX_FILES, readImage, readFile } from '../lib/attachments';
+import { isCompact, setCompact } from '../lib/compactChrome';
 
 // Touch-primary device (phone/tablet). On these, the soft keyboard's Return should insert a
 // newline rather than submit — you tap Send to send. Evaluated once; device type is stable.
@@ -111,6 +112,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
   // Per-message effort dial — a one-off override for just this turn, never touching the
   // session's configured effort. Resets to 'default' after every send.
   const [sendMode, setSendMode] = useState<SendMode>('default');
+  const [compact, setCompactState] = useState(isCompact);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -418,6 +420,15 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
             /
           </button>
         )}
+        <button
+          onClick={() => { const next = !compact; setCompactState(next); setCompact(next); }}
+          title={compact ? 'Show the tabs and header again' : 'Hide the tabs and header, to see more of the chat'}
+          aria-label={compact ? 'Show the tabs and header' : 'Hide the tabs and header'}
+          aria-pressed={compact}
+          className={`touch-only px-2.5 py-2 text-sm rounded-lg transition-colors self-start ${compact ? 'bg-blue-700/60 text-blue-100' : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
+        >
+          {compact ? '⤡' : '⤢'}
+        </button>
         {!isWorking && (images.length < MAX_IMAGES || files.length < MAX_FILES) && (
           <button
             onClick={() => fileInputRef.current?.click()}

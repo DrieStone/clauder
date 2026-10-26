@@ -81,5 +81,7 @@ body {
 }
 
 /* Typing on a phone (App.tsx sets kb-open while the keyboard is up): give the screen to the chat. */
-.kb-open .kb-hide { display: none !important; }
-.kb-open .kb-textarea { max-height: calc(var(--vvh, 100vh) * 0.25) !important; }
+.kb-open .kb-hide, .chrome-min .kb-hide { display: none !important; }
+.kb-open .kb-textarea { max-height: calc(var(--vvh, 100vh) * 0.4) !important; }
+/* The ⤢ compact-mode button is for phones only. */
+@media (hover: hover) { .touch-only { display: none !important; } }

@@ -9,6 +9,7 @@ import { onNotificationClick, markRead } from './lib/notifications';
 import { getNonScratchSessions } from './lib/sessions';
 import { tailscaleOrigin } from './lib/hosts';
 import { lastActive } from './lib/lastOpen';
+import { applyCompact } from './lib/compactChrome';
 
 /** Track the visual viewport: its height AND its offsetTop. Height alone is not enough on
  *  iOS: when the on-screen keyboard opens, iOS both (a) shrinks the visual viewport and
@@ -52,6 +53,7 @@ function AppContent() {
   // strip, header, Chat/Files tabs and task bar (`kb-hide`) and caps the message box (`kb-textarea`)
   // to leave room for the conversation (styles/globals.css).
   const keyboardOpen = IS_TOUCH_SCREEN && viewport !== null && viewport.height < window.innerHeight - 150;
+  useEffect(() => { applyCompact(); }, []);
   useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle('kb-open', keyboardOpen);
