@@ -81,14 +81,14 @@ function DashboardSettingsMenu({ sessionCount }: { sessionCount: number }) {
 }
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
-const THIRTY_SIX_HOURS_MS = 36 * 60 * 60 * 1000;
+const RECENT_MS = 48 * 60 * 60 * 1000;
 
 function classifySession(s: { lastActiveAt: string; status: string }, now: number) {
   // Working sessions are always "hot" regardless of time
   if (s.status === 'working') return 'hot' as const;
   const age = now - new Date(s.lastActiveAt).getTime();
   if (age < ONE_HOUR_MS) return 'hot' as const;
-  if (age < THIRTY_SIX_HOURS_MS) return 'warm' as const;
+  if (age < RECENT_MS) return 'warm' as const;
   return 'history' as const;
 }
 
@@ -348,7 +348,7 @@ export function Dashboard() {
                 </section>
               )}
 
-              {/* Warm: 1-36 hours. Large card, no chat. Responsive 1/2 col at 1000px. */}
+              {/* Recent: 1-48 hours. Large card, no chat. Responsive 1/2 col at 1000px. */}
               {warmSessions.length > 0 && (
                 <section>
                   <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
@@ -360,7 +360,7 @@ export function Dashboard() {
                 </section>
               )}
 
-              {/* History: 36+ hours. Minimal rows. 1/2 col at 1000px. */}
+              {/* History: 48+ hours. Minimal rows. 1/2 col at 1000px. */}
               {historySessions.length > 0 && (
                 <section>
                   <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
