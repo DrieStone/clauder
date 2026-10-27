@@ -10,6 +10,14 @@ type FireFn = (sessionId: string, message: string) => void;
 type BroadcastFn = (event: 'created' | 'updated' | 'deleted' | 'fired', trigger: Trigger, triggerId?: string) => void;
 type SessionExistsFn = (sessionId: string) => boolean;
 
+/** The first time after `now` on the schedule that was due at `due`, every `intervalSeconds`. */
+export function nextSlot(due: string, intervalSeconds: number, now: number): number {
+  const step = intervalSeconds * 1000;
+  const from = new Date(due).getTime();
+  if (!isFinite(from) || step <= 0) return now + step;
+  return from + (Math.floor(Math.max(0, now - from) / step) + 1) * step;
+}
+
 export class TriggerManager {
   private triggers = new Map<string, Trigger>();
   private timers = new Map<string, NodeJS.Timeout>();
@@ -111,11 +119,13 @@ export class TriggerManager {
       this.triggers.delete(t.id);
       this.broadcastFn('deleted', t);
     } else {
-      // Recurring: set next fire time
+      // Recurring: the next slot on the original schedule. Counting from when it actually ran
+      // would move it for good after a late run (Clauder down overnight moved a 6:10am daily
+      // check to 3:38pm); a late run still happens once, and the time of day stays.
       t.schedule = {
         type: 'recurring',
         intervalSeconds: t.schedule.intervalSeconds,
-        nextAt: new Date(Date.now() + t.schedule.intervalSeconds * 1000).toISOString(),
+        nextAt: new Date(nextSlot(t.schedule.nextAt, t.schedule.intervalSeconds, Date.now())).toISOString(),
       };
       this.scheduleNext(t);
       this.broadcastFn('updated', t);
