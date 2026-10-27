@@ -1,22 +1,20 @@
-import { memo, useState } from 'react';
+import { memo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { UIMessage, ToolUseInfo } from '@clauder/shared';
 import { ToolUseAccordion } from './ToolUseAccordion';
 import { RichMarkdown } from './RichMarkdown';
 import { ZoomableImage } from './ZoomableImage';
+import { DocOverlay } from './DocOverlay';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useSessions, useSessionActions } from '../context/SessionContext';
 import { useGuestMode } from '../lib/guestMode';
 
-/** Open base64 content in a new tab via a blob URL. Browsers block top-level navigation to
- *  data: URLs (yields a blank tab), so we must materialize a blob URL instead. */
-function openBase64InTab(base64: string, mime: string): void {
+/** A blob URL for base64 content (a data: URL won't load as a page), or null if it's malformed. */
+function base64Url(base64: string, mime: string): string | null {
   try {
     const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-    const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-    window.open(url, '_blank');
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  } catch { /* malformed base64 — nothing to open */ }
+    return URL.createObjectURL(new Blob([bytes], { type: mime }));
+  } catch { return null; }
 }
 
 export function summarizeToolUse(tool: ToolUseInfo): string {
@@ -107,6 +105,9 @@ function ProgressNote({ text }: { text: string }) {
 export const MessageBubble = memo(function MessageBubble({ message, sessionId }: { message: UIMessage; sessionId: string }) {
   const { pinMessage } = useSessionActions();
   const [lightbox, setLightbox] = useState<string | null>(null);
+  /** An attached document open in the viewer (DocOverlay); `blob` URLs are freed on close. */
+  const [doc, setDoc] = useState<{ url: string; name: string; blob: boolean } | null>(null);
+  const closeDoc = useCallback(() => setDoc(d => { if (d?.blob) URL.revokeObjectURL(d.url); return null; }), []);
   const guestMode = useGuestMode();
 
   if (message.role === 'system') {
@@ -213,18 +214,12 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
                   key={i}
                   title={`Click to view ${f.name}`}
                   onClick={() => {
-                    // Stored history carries a URL instead of the bytes — just open it.
-                    if (!f.content && f.src) { window.open(f.src, '_blank'); return; }
-                    // Open via a blob URL, never a data: URL — browsers block top-level
-                    // navigation to data: URLs (which just yields a blank tab).
-                    if (f.kind === 'document') {
-                      openBase64InTab(f.content, f.mimeType);
-                    } else {
-                      const blob = new Blob([f.content], { type: 'text/plain' });
-                      const url = URL.createObjectURL(blob);
-                      window.open(url, '_blank');
-                      setTimeout(() => URL.revokeObjectURL(url), 30000);
-                    }
+                    // Stored history carries a URL instead of the bytes — show that.
+                    if (!f.content && f.src) { setDoc({ url: f.src, name: f.name, blob: false }); return; }
+                    const url = f.kind === 'document'
+                      ? base64Url(f.content, f.mimeType)
+                      : URL.createObjectURL(new Blob([f.content], { type: 'text/plain;charset=utf-8' }));
+                    if (url) setDoc({ url, name: f.name, blob: true });
                   }}
                   className="flex items-center gap-1 px-2 py-1 bg-blue-800/40 border border-blue-600/50 rounded text-xs text-blue-200 hover:bg-blue-700/40 hover:border-blue-500 transition-colors cursor-pointer"
                 >
@@ -265,6 +260,7 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
           )}
         </div>
       )}
+      {doc && <DocOverlay url={doc.url} name={doc.name} onClose={closeDoc} />}
       {lightbox && (
         // A crash inside the zoom viewer just closes it instead of taking the whole app down.
         <ErrorBoundary label="image viewer" fallback={() => null} onError={() => setLightbox(null)}>

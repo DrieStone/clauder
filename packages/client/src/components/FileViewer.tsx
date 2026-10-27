@@ -52,6 +52,11 @@ export function FileViewer({ cwd, filePath, fileName, onBack }: FileViewerProps)
         <ImageView src={rawUrl} name={fileName} />
       ) : kind === 'video' ? (
         <VideoView src={rawUrl} />
+      ) : kind === 'pdf' ? (
+        // iOS draws a PDF frame at the document's full height, so the box around it scrolls.
+        <div className="flex-1 min-h-0 overflow-auto [-webkit-overflow-scrolling:touch] bg-white">
+          <iframe src={rawUrl} title={fileName} className="w-full h-full border-0 block" />
+        </div>
       ) : (
         <TextView cwd={cwd} filePath={filePath} fileName={fileName} />
       )}

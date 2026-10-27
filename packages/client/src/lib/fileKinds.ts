@@ -11,7 +11,7 @@ const TEXT_EXT = new Set([
   'vue', 'svelte', 'astro', 'lua', 'pl', 'r', 'dart', 'scala', 'clj', 'ex', 'exs', 'erl', 'hs', 'ml',
 ]);
 
-export type FileKind = 'image' | 'video' | 'text';
+export type FileKind = 'image' | 'video' | 'pdf' | 'text';
 
 /** Classify a filename into a viewable kind, or null if we can't display it. */
 export function fileKind(name: string): FileKind | null {
@@ -19,6 +19,7 @@ export function fileKind(name: string): FileKind | null {
   const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
   if (IMAGE_EXT.has(ext)) return 'image';
   if (VIDEO_EXT.has(ext)) return 'video';
+  if (ext === 'pdf') return 'pdf';
   if (TEXT_EXT.has(ext)) return 'text';
   if (/^(dockerfile|makefile|license|readme|procfile)$/i.test(name)) return 'text';
   return null;

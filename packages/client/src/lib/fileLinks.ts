@@ -7,7 +7,7 @@ import { fileKind } from './fileKinds';
 export function fileTabUrl(cwd: string, filePath: string): string {
   const q = `cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(filePath)}`;
   const kind = fileKind(filePath.split('/').pop() ?? filePath);
-  return kind === 'image' || kind === 'video' ? `/api/files/raw?${q}` : `/view?${q}`;
+  return kind === 'image' || kind === 'video' || kind === 'pdf' ? `/api/files/raw?${q}` : `/view?${q}`;
 }
 
 /** Whether a click asked the browser for a new tab or window (Cmd/Ctrl/Shift/middle click). */
