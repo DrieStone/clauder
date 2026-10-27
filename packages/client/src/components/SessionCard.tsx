@@ -413,7 +413,7 @@ function HotSessionCard({ session, unread, tip, taskChip, onClick }: { session: 
   );
 }
 
-// ─── Warm: 1-36 hours. Large card, no chat/input. Click to expand. ────────────
+// ─── Warm (Recent): 1-48 hours. Large card, no chat/input. Click to expand. ────────────
 
 function WarmSessionCard({ session, unread, tip, taskChip, onClick }: { session: SessionState; unread: boolean; tip: string | null; taskChip: ReactNode; onClick: () => void }) {
   const { setPermissionMode, renameSession } = useSessionActions();
