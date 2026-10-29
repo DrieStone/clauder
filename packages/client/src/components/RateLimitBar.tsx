@@ -29,33 +29,60 @@ function formatCountdown(resetIso: string): { label: string; soonMs: number } {
 
 type Level = 'ok' | 'high' | 'warn' | 'limit';
 
-/** How close a window is to its cap — the same thresholds the CLI uses for its own
- *  allowed / allowed_warning / rejected statuses. */
-function level(w: RateLimitWindow): Level {
+const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+/** Over the even pace by up to this many points is "a little over" (yellow); more is red. */
+const PACE_SLACK = 10;
+
+/** Where usage would be if spread evenly over the window: how much of it has gone by, 0–100.
+ *  An hour into the 5-hour window, 20. */
+function pacePercent(w: RateLimitWindow, windowMs: number, now = Date.now()): number {
+  const left = new Date(w.resetsAt).getTime() - now;
+  return Math.max(0, Math.min(100, (1 - left / windowMs) * 100));
+}
+
+/** Green at or under the even pace, yellow a little over, red well over; red as well once the
+ *  window is used up or the CLI says it's refusing. */
+function level(w: RateLimitWindow, windowMs: number): Level {
   const pct = w.usedPercent ?? 0;
   if (w.status === 'rejected' || pct >= 100) return 'limit';
-  if (w.status === 'allowed_warning' || pct >= 90) return 'warn';
-  if (pct >= 60) return 'high';
+  const over = pct - pacePercent(w, windowMs);
+  if (over > PACE_SLACK) return 'warn';
+  if (over > 0) return 'high';
   return 'ok';
 }
 
-const LEVEL_TEXT: Record<Level, string> = { ok: 'text-gray-300', high: 'text-amber-300', warn: 'text-red-300', limit: 'text-red-400' };
-const LEVEL_FILL: Record<Level, string> = { ok: 'bg-gray-400', high: 'bg-amber-400', warn: 'bg-red-400', limit: 'bg-red-500' };
+const LEVEL_TEXT: Record<Level, string> = { ok: 'text-green-300', high: 'text-amber-300', warn: 'text-red-300', limit: 'text-red-400' };
+const LEVEL_FILL: Record<Level, string> = { ok: 'bg-green-500', high: 'bg-amber-400', warn: 'bg-red-400', limit: 'bg-red-500' };
+
+/** The even-pace mark on a bar: a thin white line where usage would be if spread evenly. */
+function PaceMark({ pct, tall }: { pct: number; tall?: boolean }) {
+  return (
+    <span
+      className={`absolute w-px bg-white/90 ${tall ? '-top-[3px] -bottom-[3px]' : '-top-[2px] -bottom-[2px]'}`}
+      style={{ left: `${pct}%` }}
+      aria-hidden
+    />
+  );
+}
 
 /** One full-width usage bar in the collapsed header widget. */
-function HeaderBar({ w }: { w: RateLimitWindow }) {
+function HeaderBar({ w, windowMs }: { w: RateLimitWindow; windowMs: number }) {
   const pct = Math.max(0, Math.min(100, w.usedPercent ?? 0));
   return (
-    <span className="block h-[3px] rounded-full bg-gray-800 overflow-hidden">
-      <span className={`block h-full rounded-full ${LEVEL_FILL[level(w)]}`} style={{ width: `${pct}%` }} />
+    <span className="relative block">
+      <span className="block h-[3px] rounded-full bg-gray-800 overflow-hidden">
+        <span className={`block h-full rounded-full ${LEVEL_FILL[level(w, windowMs)]}`} style={{ width: `${pct}%` }} />
+      </span>
+      <PaceMark pct={pacePercent(w, windowMs)} />
     </span>
   );
 }
 
 /** The countdown takes on the window's warning color as usage nears the cap, so when you're about
  *  to be cut off, "how long until it resets" is what stands out. Green when the reset is close. */
-function countdownClass(w: RateLimitWindow, soonMs: number): string {
-  const lv = level(w);
+function countdownClass(w: RateLimitWindow, windowMs: number, soonMs: number): string {
+  const lv = level(w, windowMs);
   if (lv === 'limit') return 'text-red-400 font-semibold';
   if (soonMs < SOON_MS) return 'text-green-400';
   if (lv === 'warn') return 'text-red-300';
@@ -63,19 +90,23 @@ function countdownClass(w: RateLimitWindow, soonMs: number): string {
   return 'text-gray-400';
 }
 
-function UsageBar({ label, w }: { label: string; w: RateLimitWindow }) {
+function UsageBar({ label, w, windowMs }: { label: string; w: RateLimitWindow; windowMs: number }) {
   const pct = Math.max(0, Math.min(100, w.usedPercent ?? 0));
+  const pace = Math.round(pacePercent(w, windowMs));
   const { label: resetLabel } = formatCountdown(w.resetsAt);
   return (
     <div className="mb-2 last:mb-0">
       <div className="flex items-center justify-between text-gray-400">
         <span>{label}</span>
-        <span className={`font-semibold ${LEVEL_TEXT[level(w)]}`}>{w.usedPercent != null ? `${w.usedPercent}%` : '?'}</span>
+        <span className={`font-semibold ${LEVEL_TEXT[level(w, windowMs)]}`}>{w.usedPercent != null ? `${w.usedPercent}%` : '?'}</span>
       </div>
-      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden mt-0.5">
-        <div className={`h-full ${LEVEL_FILL[level(w)]}`} style={{ width: `${pct}%` }} />
+      <div className="relative mt-0.5">
+        <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+          <div className={`h-full ${LEVEL_FILL[level(w, windowMs)]}`} style={{ width: `${pct}%` }} />
+        </div>
+        <PaceMark pct={pace} tall />
       </div>
-      <div className="text-gray-500 mt-0.5">resets {resetLabel}</div>
+      <div className="text-gray-500 mt-0.5">on pace: {pace}% · resets {resetLabel}</div>
     </div>
   );
 }
@@ -161,10 +192,11 @@ export function RateLimitBar() {
     const { label: resetLabel, soonMs } = formatCountdown(primary.resetsAt);
     const lines = [
       session && weekly ? 'Top bar: 5-hour window · middle: time until it resets · bottom bar: 7-day window' : null,
-      session ? `5-hour window: ${session.usedPercent ?? '?'}% used, resets ${new Date(session.resetsAt).toLocaleTimeString()}` : null,
-      weekly ? `7-day window: ${weekly.usedPercent ?? '?'}% used, resets ${new Date(weekly.resetsAt).toLocaleString()}` : null,
+      session ? `5-hour window: ${session.usedPercent ?? '?'}% used (on pace: ${Math.round(pacePercent(session, FIVE_HOURS_MS))}%), resets ${new Date(session.resetsAt).toLocaleTimeString()}` : null,
+      weekly ? `7-day window: ${weekly.usedPercent ?? '?'}% used (on pace: ${Math.round(pacePercent(weekly, SEVEN_DAYS_MS))}%), resets ${new Date(weekly.resetsAt).toLocaleString()}` : null,
       overage && overage.usedPercent != null && overage.usedPercent !== weekly?.usedPercent
         ? `7-day incl. overage: ${overage.usedPercent}%` : null,
+      'White line: where you would be if you spread usage evenly. Green: at or under it; yellow: a little over; red: well over.',
       'Fable, Opus and Sonnet all draw from these same windows — pricier models just consume them faster.',
       'Click for a full breakdown.',
     ].filter(Boolean).join('\n');
@@ -180,16 +212,16 @@ export function RateLimitBar() {
             weekly ? `7-day ${weekly.usedPercent ?? '?'}%` : null,
           ].filter(Boolean).join(', ')}, resets in ${resetLabel}`}
         >
-          {session && <HeaderBar w={session} />}
-          <span className={`text-[10px] leading-none font-mono tabular-nums text-center whitespace-nowrap ${countdownClass(primary, soonMs)}`}>
+          {session && <HeaderBar w={session} windowMs={FIVE_HOURS_MS} />}
+          <span className={`text-[10px] leading-none font-mono tabular-nums text-center whitespace-nowrap ${countdownClass(primary, session ? FIVE_HOURS_MS : SEVEN_DAYS_MS, soonMs)}`}>
             {resetLabel}
           </span>
-          {weekly && <HeaderBar w={weekly} />}
+          {weekly && <HeaderBar w={weekly} windowMs={SEVEN_DAYS_MS} />}
         </button>
         {open && (
           <div className="absolute right-0 top-full mt-1 z-50 bg-gray-900 border border-gray-700 rounded p-3 text-xs max-w-[280px] w-[280px] shadow-lg" style={placement ?? undefined}>
-            {session && <UsageBar label="5-hour window" w={session} />}
-            {weekly && <UsageBar label="7-day window" w={weekly} />}
+            {session && <UsageBar label="5-hour window" w={session} windowMs={FIVE_HOURS_MS} />}
+            {weekly && <UsageBar label="7-day window" w={weekly} windowMs={SEVEN_DAYS_MS} />}
             <div className="border-t border-gray-800 my-2" />
             <CostTable title="Last 24h" w={rateLimit.costSummary?.last24h} />
             <CostTable title="Last 7d" w={rateLimit.costSummary?.last7d} />
