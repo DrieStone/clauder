@@ -1,3 +1,4 @@
+import { usePopoverPlacement } from '../lib/popoverPosition';
 import { useState, useRef, useEffect } from 'react';
 import type { SessionState } from '@clauder/shared';
 import { useSessions } from '../context/SessionContext';
@@ -17,10 +18,14 @@ export function warmLabel(until: string, mode: 'manual' | 'auto'): string {
 /** Hours from now until 11 PM (or 1 if that's past). */
 const hoursUntilTonight = () => { const t = new Date(); t.setHours(23, 0, 0, 0); return Math.max(1, (t.getTime() - Date.now()) / 3_600_000); };
 
+const IS_TOUCH = typeof window !== 'undefined' && window.matchMedia?.('(hover: none)').matches;
+
 export function KeepWarmButton({ session }: { session: SessionState }) {
   const { state, setKeepWarm, setKeepWarmAuto } = useSessions();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // Kept on screen on a phone, where the button sits at the left of the header's second row.
+  const placement = usePopoverPlacement(ref, open, 256);
   const [, tick] = useState(0);
   useEffect(() => { const i = setInterval(() => tick(n => n + 1), 30_000); return () => clearInterval(i); }, []);
   useEffect(() => {
@@ -39,7 +44,8 @@ export function KeepWarmButton({ session }: { session: SessionState }) {
   return (
     <div className="relative shrink-0" ref={ref}>
       <button
-        onClick={() => (w ? setOpen(o => !o) : setKeepWarm(projectId, hours))}
+        // A touch screen has no right-click, so a tap always opens the menu there.
+        onClick={() => (w || IS_TOUCH ? setOpen(o => !o) : setKeepWarm(projectId, hours))}
         onContextMenu={(e) => { e.preventDefault(); setOpen(o => !o); }}
         className={`text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap ${w ? 'text-orange-300 border-orange-500/40 bg-orange-500/10' : 'text-gray-500 border-gray-700 hover:text-gray-300'}`}
         title={w
@@ -49,7 +55,7 @@ export function KeepWarmButton({ session }: { session: SessionState }) {
         🔥{w ? ` ${warmLabel(w.until, w.mode)}` : ''}
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-2 space-y-1 text-xs text-gray-300">
+        <div style={placement ?? undefined} className="absolute right-0 top-full mt-1 z-50 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-2 space-y-1 text-xs text-gray-300">
           <div className="px-1 pb-1 text-[11px] text-gray-400">
             {w ? (w.mode === 'auto' ? 'Warm automatically: each session stays warm for 3 hours after its last turn.' : `Warm until ${new Date(w.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`) : 'Not being kept warm.'}
           </div>
