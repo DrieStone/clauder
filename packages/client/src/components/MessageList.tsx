@@ -6,7 +6,8 @@ import { RichMarkdown } from './RichMarkdown';
 import { useSessionActions } from '../context/SessionContext';
 import { useGuestMode } from '../lib/guestMode';
 
-const NEAR_BOTTOM_PX = 80;
+/** Scrolled up by more than this and the chat stays put (no jumping to new messages). */
+const NEAR_BOTTOM_PX = 24;
 
 /** A pinned message's own full-content copy, shown at the top of the chat instead of in the
  *  scrollable history — same open/close pattern as PlanBanner. Each pin has its own
@@ -46,12 +47,21 @@ function PinnedMessage({ message, sessionId }: { message: UIMessage; sessionId: 
 /** Memoized on `messages`, whose identity changes only when this session's messages do.
  *  `statusReport` (this task's status note, if any) is drawn where it was written: after the
  *  last message before it. */
-export const MessageList = memo(function MessageList({ messages, sessionId, statusReport }: { messages: UIMessage[]; sessionId: string; statusReport?: StatusReport | null }) {
+export const MessageList = memo(function MessageList({ messages, sessionId, statusReport, textOnly }: { messages: UIMessage[]; sessionId: string; statusReport?: StatusReport | null; textOnly?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Whether we should auto-scroll on new content. Starts true; flips off the moment the
   // user scrolls away from the bottom, and back on once they scroll (or jump) back to it.
   const stickToBottomRef = useRef(true);
   const [showJumpButton, setShowJumpButton] = useState(false);
+  /** New messages arrived while scrolled up: the jump button lights up. */
+  const [newBelow, setNewBelow] = useState(false);
+  /** While scrolled up: how far the view's top is from the top of the conversation, so new or
+   *  growing messages below don't move what you're reading. column-reverse measures scrollTop
+   *  from the bottom, so content added at the bottom would otherwise slide the view (iOS Safari
+   *  has no scroll anchoring to hold it). */
+  const fromTopRef = useRef(0);
+  const lastCountRef = useRef(messages.length);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   // The scroll container uses flex-direction: column-reverse (see the render below), with
   // messages rendered in REVERSE order. This is the standard chat-UI trick: it makes "pinned
@@ -63,14 +73,18 @@ export const MessageList = memo(function MessageList({ messages, sessionId, stat
   // the browser's next paint. column-reverse sidesteps the race entirely: the browser keeps
   // scrollTop pinned at 0 through a resize on its own, the same native mechanism it uses to
   // keep you pinned to the bottom while new content streams in. Nothing to recompute, ever.
-  const isNearBottom = (el: HTMLDivElement) => el.scrollTop < NEAR_BOTTOM_PX;
+  // scrollTop is 0 at the bottom and goes NEGATIVE as you scroll up (column-reverse), so compare its
+  // size: a plain `scrollTop < N` was true at any height and kept pulling the view back down.
+  const isNearBottom = (el: HTMLDivElement) => Math.abs(el.scrollTop) < NEAR_BOTTOM_PX;
 
   const handleScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     const near = isNearBottom(el);
     stickToBottomRef.current = near;
+    fromTopRef.current = el.scrollHeight - el.clientHeight + el.scrollTop;
     setShowJumpButton(!near);
+    if (near) setNewBelow(false);
   }, []);
 
   // Mounting fresh (switching to the Chat tab, or switching sessions while already on it)
@@ -78,6 +92,7 @@ export const MessageList = memo(function MessageList({ messages, sessionId, stat
   useLayoutEffect(() => {
     stickToBottomRef.current = true;
     setShowJumpButton(false);
+    setNewBelow(false);
     const el = containerRef.current;
     if (el) el.scrollTop = 0;
   }, [sessionId]);
@@ -86,10 +101,31 @@ export const MessageList = memo(function MessageList({ messages, sessionId, stat
   // new messages and container resizes on its own, but re-asserting it here is free (0 is a
   // constant, not a stale computed value like scrollHeight was) and covers any browser-specific
   // anchoring gap without reintroducing the resize-race the old scrollHeight approach had.
+  // Scrolled up: hold the view where it is, and flag that there's more below.
   useLayoutEffect(() => {
     const el = containerRef.current;
-    if (el && stickToBottomRef.current) el.scrollTop = 0;
-  }, [messages]);
+    const grew = messages.length > lastCountRef.current;
+    lastCountRef.current = messages.length;
+    if (!el) return;
+    if (stickToBottomRef.current) { el.scrollTop = 0; return; }
+    el.scrollTop = fromTopRef.current - (el.scrollHeight - el.clientHeight);
+    if (grew) setNewBelow(true);
+  }, [messages, textOnly]);
+
+  // A message can finish growing after that (markdown, images, a streamed reply), and with
+  // column-reverse growth below still slides the view, so hold it on every size change too.
+  useLayoutEffect(() => {
+    const el = containerRef.current, content = contentRef.current;
+    if (!el || !content || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (stickToBottomRef.current) return;
+      const want = fromTopRef.current - (el.scrollHeight - el.clientHeight);
+      if (Math.abs(el.scrollTop - want) > 1) el.scrollTop = want;
+    });
+    ro.observe(content);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [messages.length === 0]);
 
   const scrollToBottom = () => {
     const el = containerRef.current;
@@ -97,6 +133,7 @@ export const MessageList = memo(function MessageList({ messages, sessionId, stat
     el.scrollTo({ top: 0, behavior: 'smooth' });
     stickToBottomRef.current = true;
     setShowJumpButton(false);
+    setNewBelow(false);
   };
 
   if (messages.length === 0) {
@@ -126,24 +163,27 @@ export const MessageList = memo(function MessageList({ messages, sessionId, stat
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 flex flex-col-reverse gap-2 sm:gap-3"
+        className={`flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 flex flex-col-reverse [overflow-anchor:none] ${textOnly ? 'text-only' : ''}`}
       >
-        {reversedMessages.map((msg, i) => (
-          <Fragment key={msg.id}>
-            {i === noteAt && statusReport && <StatusNoteCard key={statusReport.generatedAt} report={statusReport} latest={i === 0} />}
-            <MessageBubble message={msg} sessionId={sessionId} />
-          </Fragment>
-        ))}
+        <div ref={contentRef} className="flex flex-col-reverse gap-2 sm:gap-3">
+          {reversedMessages.map((msg, i) => (
+            <Fragment key={msg.id}>
+              {i === noteAt && statusReport && <StatusNoteCard key={statusReport.generatedAt} report={statusReport} latest={i === 0} />}
+              <MessageBubble message={msg} sessionId={sessionId} />
+            </Fragment>
+          ))}
+        </div>
       </div>
       {showJumpButton && (
         <button
           onClick={scrollToBottom}
-          className="absolute bottom-4 right-4 w-9 h-9 rounded-full bg-gray-800 border border-gray-700 hover:bg-gray-700 text-gray-200 shadow-lg flex items-center justify-center transition-colors"
+          className={`absolute bottom-4 left-1/2 -translate-x-1/2 h-10 px-3 rounded-full border shadow-lg flex items-center gap-1.5 text-xs transition-colors ${newBelow ? 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500' : 'bg-gray-800 border-gray-700 text-gray-200 hover:bg-gray-700'}`}
           title="Jump to latest"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
           </svg>
+          {newBelow ? 'New messages' : 'Latest'}
         </button>
       )}
     </div>

@@ -94,3 +94,6 @@ body {
 .kb-open .composer-row .kb-skip { display: none !important; }
 /* The ⤢ compact-mode button is for phones only. */
 @media (hover: hover) { .touch-only { display: none !important; } }
+
+/* The chat's "Hide tools" filter (SessionView tab bar): just the conversation's text. */
+.text-only .msg-toolonly, .text-only .msg-tools { display: none !important; }

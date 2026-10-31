@@ -147,7 +147,7 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
   const toolOnly = hasTools && !hasText && !hasAttachments && !message.isStreaming;
 
   return (
-    <div id={`msg-${message.id}`} className={`group flex items-end gap-1.5 ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div id={`msg-${message.id}`} className={`group flex items-end gap-1.5 ${isUser ? 'justify-end' : 'justify-start'} ${toolOnly && !hasThinking ? 'msg-toolonly' : ''}`}>
       <div
         className={`max-w-[85%] min-w-0 rounded-lg ${toolOnly ? 'px-2 py-1.5' : 'px-3 py-2'} text-sm break-words overflow-hidden ${
           isUser
@@ -164,7 +164,7 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId }:
           </div>
         )}
         {message.toolUses && message.toolUses.length > 0 && (
-          <div className={`flex flex-col gap-1 ${toolOnly ? '' : 'mb-1.5'}`}>
+          <div className={`msg-tools flex flex-col gap-1 ${toolOnly ? '' : 'mb-1.5'}`}>
             {message.toolUses.map((tool) => (
               <ToolUseAccordion key={tool.id} tool={tool} sessionId={sessionId} />
             ))}

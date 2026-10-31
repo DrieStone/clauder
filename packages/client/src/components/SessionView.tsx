@@ -56,6 +56,9 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   // whatever effort the previous model was on.
   const effortByModelRef = useRef<Map<string, string>>(new Map());
   const [activeTab, setActiveTabState] = useState<'chat' | 'files' | 'notes' | 'summary' | 'debug'>('chat');
+  // "Hide tools": the chat shows only the conversation's text, no tool calls. Kept per device.
+  const [textOnly, setTextOnly] = useState(() => { try { return localStorage.getItem('clauder.chatTextOnly') === '1'; } catch { return false; } });
+  const toggleTextOnly = () => setTextOnly(on => { try { localStorage.setItem('clauder.chatTextOnly', on ? '0' : '1'); } catch { /* storage unavailable */ } return !on; });
   useEffect(() => {
     setActiveTabState(tabBySessionRef.current.get(session.id) ?? 'chat');
   }, [session.id]);
@@ -557,6 +560,16 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
             <span className="ml-1 text-[10px] text-gray-600">{session.debugLog.length}</span>
           )}
         </button>
+        {activeTab === 'chat' && (
+          <button
+            onClick={toggleTextOnly}
+            aria-pressed={textOnly}
+            className={`ml-auto shrink-0 self-center mr-2 px-2 py-1 rounded border text-[11px] whitespace-nowrap transition-colors ${textOnly ? 'border-blue-500/60 bg-blue-500/15 text-blue-300' : 'border-gray-700 text-gray-500 hover:text-gray-300'}`}
+            title={textOnly ? 'Tool calls are hidden. Click to show them again.' : 'Hide tool calls (commands, file edits, searches) to read just the conversation'}
+          >
+            {textOnly ? 'Tools hidden' : 'Hide tools'}
+          </button>
+        )}
       </div>
 
       {activeTab === 'chat' ? (
@@ -660,7 +673,7 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           )}
 
           {/* Messages */}
-          <MessageList key={session.activeThreadId} messages={session.messages} sessionId={session.id} statusReport={statusNote && statusNote.threadId === session.activeThreadId ? statusNote : null} />
+          <MessageList key={session.activeThreadId} messages={session.messages} sessionId={session.id} statusReport={statusNote && statusNote.threadId === session.activeThreadId ? statusNote : null} textOnly={textOnly} />
 
           {/* Queued messages */}
           {session.queuedMessages.length > 0 && (
