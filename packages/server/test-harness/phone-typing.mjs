@@ -36,5 +36,16 @@ ok(rows === 1, 'buttons on one row', rows);
 await shot('/private/tmp/phone-typing.png');
 await ev(`document.querySelector('textarea').blur()`); await sleep(400);
 ok(!(await ev(`document.documentElement.classList.contains('kb-open')`)), 'blur turns it off');
-await ev(`const t=document.querySelector('textarea'); const set=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set; set.call(t,''); t.dispatchEvent(new Event('input',{bubbles:true})); localStorage.removeItem('clauder.lastActive')`);
+await ev(`const t=document.querySelector('textarea'); const set=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set; set.call(t,''); t.dispatchEvent(new Event('input',{bubbles:true}))`);
+// The task bar's "+ New task" box sits in a bar typing mode hides: typing in it must not hide it
+// (that closed the keyboard on the iPhone, a flash and nothing typed). Cancelled; nothing is created.
+await ev(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('New task')).click()`); await sleep(400);
+const field = `[...document.querySelectorAll('.kb-hide textarea, .kb-hide input')].find(e => e.offsetParent !== null)`;
+ok(await ev(`!!(${field})`), 'new-task box opens');
+await ev(`(${field}).focus()`); await sleep(400);
+ok(await ev(`document.documentElement.classList.contains('kb-open') && document.activeElement?.offsetParent !== null`), 'typing in it: typing mode on, box still showing');
+await send('Input.insertText', { text: 'test task' }); await sleep(200);
+ok(await ev(`document.activeElement?.value === 'test task'`), 'and it takes the text');
+await ev(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Cancel')?.click()`); await sleep(300);
+await ev(`localStorage.removeItem('clauder.lastActive')`);
 console.log(`\n${pass} passed, ${fail} failed`); ws.close(); process.exit(fail ? 1 : 0);
