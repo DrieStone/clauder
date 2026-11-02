@@ -32,8 +32,6 @@ type Level = 'ok' | 'high' | 'warn' | 'limit';
 
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-/** Over the even pace by up to this many points is "a little over" (yellow); more is red. */
-const PACE_SLACK = 10;
 
 type PaceProfile = NonNullable<RateLimitInfo['paceProfile']>;
 /** When the owner usually works (server usage-profile.ts), set from the latest usage info on each
@@ -72,13 +70,27 @@ function pacePercent(w: RateLimitWindow, windowMs: number, now = Date.now()): nu
 
 /** Green at or under the even pace, yellow a little over, red well over; red as well once the
  *  window is used up or the CLI says it's refusing. */
+/** When the window runs out if the rest of it goes like this week so far: your usual pattern
+ *  (the pace line's shape) at this week's rate (used / expected-by-now, never below 1). Null if it
+ *  lasts to the reset. Steps by the hour. */
+function runOutAt(w: RateLimitWindow, windowMs: number, now = Date.now()): number | null {
+  const used = w.usedPercent ?? 0;
+  const end = new Date(w.resetsAt).getTime();
+  const paceNow = pacePercent(w, windowMs, now);
+  const rate = paceNow > 0 ? Math.max(1, used / paceNow) : 1;
+  for (let t = now + HOUR_MS; t < end; t += HOUR_MS) {
+    if (used + rate * (pacePercent(w, windowMs, t) - paceNow) >= 100) return t;
+  }
+  return null;
+}
+
+/** Green at or under the usual pace; yellow ahead of it but lasting to the reset; red when it runs
+ *  out before the reset at this week's rate, or already has. */
 function level(w: RateLimitWindow, windowMs: number): Level {
   const pct = w.usedPercent ?? 0;
   if (w.status === 'rejected' || pct >= 100) return 'limit';
-  const over = pct - pacePercent(w, windowMs);
-  if (over > PACE_SLACK) return 'warn';
-  if (over > 0) return 'high';
-  return 'ok';
+  if (pct <= pacePercent(w, windowMs)) return 'ok';
+  return runOutAt(w, windowMs) !== null ? 'warn' : 'high';
 }
 
 const LEVEL_TEXT: Record<Level, string> = { ok: 'text-green-300', high: 'text-amber-300', warn: 'text-red-300', limit: 'text-red-400' };
@@ -122,6 +134,7 @@ function countdownClass(w: RateLimitWindow, windowMs: number, soonMs: number): s
 function UsageBar({ label, w, windowMs }: { label: string; w: RateLimitWindow; windowMs: number }) {
   const pct = Math.max(0, Math.min(100, w.usedPercent ?? 0));
   const pace = Math.round(pacePercent(w, windowMs));
+  const runOut = (w.usedPercent ?? 0) < 100 && (w.usedPercent ?? 0) > pacePercent(w, windowMs) ? runOutAt(w, windowMs) : null;
   const { label: resetLabel } = formatCountdown(w.resetsAt);
   return (
     <div className="mb-2 last:mb-0">
@@ -136,6 +149,11 @@ function UsageBar({ label, w, windowMs }: { label: string; w: RateLimitWindow; w
         <PaceMark pct={pace} tall />
       </div>
       <div className="text-gray-500 mt-0.5">on pace: {pace}% · resets {resetLabel}</div>
+      {runOut !== null && (
+        <div className="text-red-300 mt-0.5">
+          At this rate it runs out {new Date(runOut).toLocaleString([], { weekday: 'short', hour: 'numeric' })}, before the reset.
+        </div>
+      )}
     </div>
   );
 }
@@ -234,8 +252,8 @@ export function RateLimitBar() {
       overage && overage.usedPercent != null && overage.usedPercent !== weekly?.usedPercent
         ? `7-day incl. overage: ${overage.usedPercent}%` : null,
       rateLimit.paceProfile
-        ? 'White line: where you would be at your usual pace (7-day: from when you used Claude over the last 6 weeks, so it barely moves overnight). Green: at or under it; yellow: a little over; red: well over.'
-        : 'White line: where you would be if you spread usage evenly. Green: at or under it; yellow: a little over; red: well over.',
+        ? 'White line: where you would be at your usual pace (7-day: from when you used Claude over the last 6 weeks, so it barely moves overnight). Green: at or under it; yellow: ahead of it but lasting to the reset; red: at this rate it runs out before the reset.'
+        : 'White line: where you would be if you spread usage evenly. Green: at or under it; yellow: ahead of it but lasting to the reset; red: at this rate it runs out before the reset.',
       'Fable, Opus and Sonnet all draw from these same windows — pricier models just consume them faster.',
       'Click for a full breakdown.',
     ].filter(Boolean).join('\n');
