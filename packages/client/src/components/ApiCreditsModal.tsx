@@ -70,6 +70,12 @@ function WorkspaceField({ value, onSave }: { value: string; onSave: (v: string) 
   );
 }
 
+/** "2026-11-16" → "Nov 16"; `addDays` shifts it (-1: the period's last day). */
+function shortDate(day: string, addDays = 0): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(y, m - 1, d + addDays).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 export function ApiCreditsModal({ onClose }: { onClose: () => void }) {
   const { state, setApiCreditsSettings, setApiAllowed } = useSessions();
   const status = state.apiCredits;
@@ -156,13 +162,16 @@ export function ApiCreditsModal({ onClose }: { onClose: () => void }) {
 
             {/* Spend */}
             <div className="space-y-2">
-              <Meter label="This month" spent={status.month === localDay.slice(0, 7) ? status.monthSpentUsd : 0} budget={status.settings.monthlyBudgetUsd} />
+              <Meter label={`This credit period (${shortDate(status.month)} – ${shortDate(status.periodRenews, -1)})`} spent={status.monthSpentUsd} budget={status.settings.monthlyBudgetUsd} />
               <Meter label="Today" spent={status.day === localDay ? status.daySpentUsd : 0} budget={status.settings.dailyBudgetUsd} />
-              <p className="text-[11px] text-gray-500">Spend is estimated from the CLI's own cost figure. Your Anthropic Console has the real balance.</p>
+              <p className="text-[11px] text-gray-500">
+                About <span className="text-gray-300">${Math.max(0, status.settings.creditUsd - status.monthSpentUsd).toFixed(2)}</span> of your ${status.settings.creditUsd} credit left by Clauder's count; it renews {shortDate(status.periodRenews)}.
+                {' '}Spend is estimated from the CLI's own cost figure and counts only Clauder; your Anthropic Console has the real balance.
+              </p>
             </div>
 
             <div className="grid grid-cols-3 gap-2">
-              <Budget label="Monthly cap" value={status.settings.monthlyBudgetUsd} onSave={(n) => set({ monthlyBudgetUsd: n })} hint="Stop for the month at this much. Your credit is $200; the margin covers estimate error." />
+              <Budget label="Period cap" value={status.settings.monthlyBudgetUsd} onSave={(n) => set({ monthlyBudgetUsd: n })} hint={`Stop for the credit period at this much. Your credit is $${status.settings.creditUsd}, renewing on the ${status.settings.creditDay}th; the margin covers estimate error.`} />
               <Budget label="Daily cap" value={status.settings.dailyBudgetUsd} onSave={(n) => set({ dailyBudgetUsd: n })} />
               <Budget label="Per turn" value={status.settings.perTurnBudgetUsd} onSave={(n) => set({ perTurnBudgetUsd: n })} hint="One turn is cut off at this much; the work so far is kept." />
             </div>

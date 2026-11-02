@@ -105,7 +105,7 @@ let allowedId;
   ok(S(allowedId).messages.filter(m => m.role === 'user' && m.content === 'build the feature').length === 1, 'user message not duplicated');
   const lines = sys(allowedId);
   ok(lines.some(x => x.startsWith('💳 Usage limit reached — continuing on API credits')), 'announced', lines);
-  ok(lines.some(x => /That turn cost about \$0\.50 on API credits \(\$0\.50 of \$170 this month\)/.test(x)), 'cost line', lines);
+  ok(lines.some(x => /That turn cost about \$0\.50 on API credits \(\$0\.50 of \$170 this credit period\)/.test(x)), 'cost line', lines);
   const st = ac.status();
   ok(st.monthSpentUsd === 0.5 && st.daySpentUsd === 0.5 && st.recent[0]?.usd === 0.5 && st.topSessions[0]?.name === 'Allowed', 'recorded in the ledger', st);
   ok(fs.existsSync(LEDGER) || (ac.saveNow(), fs.existsSync(LEDGER)), 'ledger on disk');

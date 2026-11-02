@@ -1928,7 +1928,7 @@ export class ManagedSession {
           const back = new Date(apiPlan.subscriptionBackAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
           this.emitSystemMessage(
             `💳 Usage limit reached — continuing on API credits until your subscription is back (${back}). ` +
-            `Each turn is capped at $${apiPlan.maxBudgetUsd}; $${apiPlan.monthLeftUsd.toFixed(2)} left this month. ` +
+            `Each turn is capped at $${apiPlan.maxBudgetUsd}; $${apiPlan.monthLeftUsd.toFixed(2)} left in this credit period. ` +
             'The first turn re-reads the whole conversation at full price.');
         }
       } else if (this.lastTurnOnApi) {
@@ -3079,7 +3079,7 @@ export class ManagedSession {
       }
       if (apiPlan && turnCost > 0) {
         const spent = this.apiCredits?.spentSoFar();
-        if (spent) this.emitSystemMessage(`💳 That turn cost about $${turnCost.toFixed(2)} on API credits ($${spent.month.toFixed(2)} of $${spent.monthlyBudgetUsd} this month).`);
+        if (spent) this.emitSystemMessage(`💳 That turn cost about $${turnCost.toFixed(2)} on API credits ($${spent.month.toFixed(2)} of $${spent.monthlyBudgetUsd} this credit period).`);
       }
 
       // Deferred auth-expired surfacing (see the assistant-text sniff): flip the session

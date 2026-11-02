@@ -132,7 +132,9 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     (`config.apiCredits`) or approved with "Use API credits now" retries on the owner's Anthropic API
     credit instead of sleeping, via `session.ts`'s `apiPlan` (one per turn, null on ordinary turns).
     Off unless switched on in the usage panel (client `ApiCreditsModal.tsx`); never for a guest's
-    message; monthly, daily and per-turn budgets (the CLI enforces the last with `--max-budget-usd`);
+    message; period, daily and per-turn budgets (the CLI enforces the last with `--max-budget-usd`).
+    The owner's $200 API credit renews on the 16th, so the "monthly" budget runs by credit period,
+    16th to 15th (`creditPeriod`, settings `creditUsd`/`creditDay`; ledgers keyed by period start);
     Fable runs as Opus 5.5, effort capped at high. The key is `~/.clauder/api-key` (user-created,
     never in the repo or settings), handed to the CLI as `--settings {"apiKeyHelper": ...}` so it
     never enters the environment every Bash call inherits. A key not tied to a workspace (sk-ant-usr-...) also needs `settings.workspaceId`, sent as `anthropic-workspace-id` through the same `--settings` env block. API turns skip `recordSubscriptionLimits`,
@@ -374,8 +376,8 @@ tail -f ~/.clauder/clauder.log
 - The CLI deletes transcripts idle past cleanupPeriodDays (default 30; ~/.claude/settings.json sets 90); resuming one then fails with No conversation found
 - ANTHROPIC_API_KEY is unset in prod, so task-classifier.ts auto-compact (a direct API call) silently no-ops; make out-of-band LLM calls through the CLI instead (runClaudeOneShot in claude-oneshot.ts)
 - With an API key active the CLI disables claude.ai connectors, and a refused key makes it retry for minutes emitting api_retry events
-- Model IDs are also hardcoded well outside hard rule 10's files: defaults like SCRATCH_MODEL, SCRATCH_CONVERSATION_MODEL, DEFAULT_EXECUTOR_MODEL, SMART_MODEL (search.ts) and CLAUDE_CODE_SUBAGENT_MODEL, plus one-off calls (task close, task classifier, API-credit Fable fallback, ProjectTasks.tsx), so grep packages/*/src for the old ID when changing one. CLAUDE_CODE_SUBAGENT_MODEL only covers sub-agents launched without a model; named models and built-in Explore bypass it
-- There is no local price table: per-model cost comparisons come from ~/.clauder/cost-ledger.json, and to re-price its turns from tokens, charge cache writes at 2x input and count thinking inside output. Per Mtok, Opus 5.5 is $4/$20 with $0.20 cache reads and Sonnet 5.5 is $2/$10; cache reads dominate long agentic turns
+- Model IDs are also hardcoded well outside hard rule 10's files: defaults like SCRATCH_MODEL, SCRATCH_CONVERSATION_MODEL, DEFAULT_EXECUTOR_MODEL, SMART_MODEL (search.ts) and CLAUDE_CODE_SUBAGENT_MODEL, plus one-off calls (task close, task classifier, API-credit Fable fallback, ProjectTasks.tsx), so grep packages/*/src for the old ID when changing one, skipping the hits hard rule 10 says to keep. CLAUDE_CODE_SUBAGENT_MODEL only covers sub-agents launched without a model; named models and built-in Explore bypass it
+- Prices per Mtok live in two places, PRICES (usage-profile-worker.ts) and WRITE_PER_MTOK (ColdResume.tsx); actual per-model costs come from ~/.clauder/cost-ledger.json, and to re-price its turns from tokens, charge cache writes at 2x input and count thinking inside output. Cache reads dominate long agentic turns
 - Sessions are child processes of the Clauder server, so restarting it from inside one kills that session mid-turn (looks like a random "interruption"). Test on a throwaway server instead: HOME=/tmp/x PORT=3999 node packages/server/dist/index.js. Its CLI isn't logged in (replies Not logged in, model synthetic), so it makes no real Claude calls; before copying sessions.json into its HOME, strip goal, modelPlan, pendingWakeup and monitors so restore can't start turns. lsof can't see listeners from inside a session, and a grep-based kill can match your own shell
 - To test without a real CLI: fake-CLI harnesses live in packages/server/test-harness (run with node after npm run build; keep them there, since macOS cleanup wipes /tmp), and UI states can be faked by wrapping window.WebSocket via CDP addScriptToEvaluateOnNewDocument and dispatching fake MessageEvents
 - clauder.log: browser JS crashes are on client:mobile or client:desktop lines (tagged by user agent; check there first); older lines lack timestamps, so bound searches by line number from a known timestamp, not string comparison
@@ -384,4 +386,3 @@ tail -f ~/.clauder/clauder.log
 - Client performance: per-message and per-card components use useSessionActions()/useTagRegistry() plus React.memo, because any useSessions() inside re-renders them on every WS message; animate only transform or opacity (a width/margin progress bar forced 60-120 page layouts a second, ~15% of the tab's CPU)
 - Hover-only controls (`opacity-0 group-hover:opacity-100`) are invisible on phones — gate the hiding behind Tailwind's `[@media(hover:hover)]:` variant so touch devices still see them.
 - Popover Escape handlers listen on document and call preventDefault; App.tsx leaves the session on unhandled Escape
-- Phone typing mode hides .kb-hide bars; any text field inside one needs the :focus-within exception or it vanishes on tap

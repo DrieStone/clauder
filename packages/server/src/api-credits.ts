@@ -67,6 +67,16 @@ export interface ApiTurnRequest {
 const localDay = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/** The owner's API credit is granted on a set day each month (the 16th), so "this month" for the
+ *  budget runs from that day to the day before it next month. The period's key is its start date. */
+export function creditPeriod(d: Date, creditDay: number): { key: string; start: Date; renews: Date } {
+  const on = (y: number, m: number) => new Date(y, m, Math.min(creditDay, new Date(y, m + 1, 0).getDate()));
+  let start = on(d.getFullYear(), d.getMonth());
+  if (localDay(d) < localDay(start)) start = on(d.getFullYear(), d.getMonth() - 1);
+  const renews = on(start.getFullYear(), start.getMonth() + 1);
+  return { key: localDay(start), start, renews };
+}
+
 /** Fable is far dearer than the credit is meant for: a turn on API credits runs on Opus 5.5 instead. */
 export function capApiModel(model: string | undefined): string | undefined {
   return model && /fable/i.test(model) ? 'claude-opus-5-5' : model;
@@ -132,6 +142,8 @@ export class ApiCredits {
       perTurnBudgetUsd: num(s.perTurnBudgetUsd, d.perTurnBudgetUsd),
       model: s.model === 'session' || (typeof s.model === 'string' && /^claude-[a-z0-9-]+$/.test(s.model)) ? s.model : d.model,
       workspaceId: typeof s.workspaceId === 'string' && /^wrkspc_[A-Za-z0-9]{10,}$/.test(s.workspaceId.trim()) ? s.workspaceId.trim() : '',
+      creditUsd: num(s.creditUsd, d.creditUsd),
+      creditDay: Number.isInteger(s.creditDay) && s.creditDay >= 1 && s.creditDay <= 28 ? s.creditDay : d.creditDay,
     };
   }
 
@@ -159,14 +171,17 @@ export class ApiCredits {
 
   // ── Budget ───────────────────────────────────────────────────────────────
 
+  /** The credit period now (creditPeriod). Ledgers are keyed by its start date; ones from before
+   *  periods (keyed "2026-10") just count as past. */
+  private period() { return creditPeriod(new Date(this.now()), this.data.settings.creditDay || 16); }
+
   private month(): MonthLedger {
-    const key = localDay(new Date(this.now())).slice(0, 7);
-    return this.data.months[key] ??= { totalUsd: 0, days: {}, sessions: {} };
+    return this.data.months[this.period().key] ??= { totalUsd: 0, days: {}, sessions: {} };
   }
 
   private spent(): { month: number; day: number } {
     const today = localDay(new Date(this.now()));
-    const m = this.data.months[today.slice(0, 7)];
+    const m = this.data.months[this.period().key];
     return { month: m?.totalUsd ?? 0, day: m?.days[today] ?? 0 };
   }
 
@@ -235,7 +250,9 @@ export class ApiCredits {
     if (b) return b.reason === 'key' ? 'Anthropic refused the API key. Replace it in ~/.clauder/api-key.' : 'The API account is out of credits (or billing failed). Paused for a few hours.';
     if (this.remaining() < MIN_TURN_USD) {
       const spent = this.spent();
-      const binding = s.dailyBudgetUsd - spent.day <= s.monthlyBudgetUsd - spent.month ? 'today' : 'this month';
+      const binding = s.dailyBudgetUsd - spent.day <= s.monthlyBudgetUsd - spent.month
+        ? 'today'
+        : `this credit period (it renews ${this.period().renews.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`;
       return `The API budget is used up for ${binding}. Raise it in the usage panel if you want more.`;
     }
     if (approving && subscriptionBlockedUntilMs(this.now()) === null) return 'The subscription is not out of usage right now.';
@@ -291,14 +308,16 @@ export class ApiCredits {
     const key = this.keyInfo();
     const spent = this.spent();
     const today = localDay(new Date(this.now()));
-    const m = this.data.months[today.slice(0, 7)];
+    const period = this.period();
+    const m = this.data.months[period.key];
     const b = this.blocked();
     const until = subscriptionBlockedUntilMs(this.now());
     return {
       settings: { ...this.data.settings },
       keyState: key.state,
       keyHint: key.hint,
-      month: today.slice(0, 7),
+      month: period.key,
+      periodRenews: localDay(period.renews),
       day: today,
       monthSpentUsd: round2(spent.month),
       daySpentUsd: round2(spent.day),

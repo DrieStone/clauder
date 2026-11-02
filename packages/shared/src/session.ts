@@ -70,7 +70,7 @@ export interface SessionConfig {
 export interface ApiCreditsSettings {
   /** Master switch. Off, nothing ever runs on API credits. */
   enabled: boolean;
-  /** Stop for the calendar month at this much estimated spend. */
+  /** Stop for the credit period (creditDay to the day before it next month) at this much estimated spend. */
   monthlyBudgetUsd: number;
   dailyBudgetUsd: number;
   /** One turn is cut off at this much (the CLI's --max-budget-usd). */
@@ -80,6 +80,10 @@ export interface ApiCreditsSettings {
   /** For a key that isn't tied to one workspace: the workspace to bill ("wrkspc_..."), sent as the
    *  anthropic-workspace-id header. Not a secret. Empty for a workspace key. */
   workspaceId: string;
+  /** The API credit granted each period ($200), for showing what's left of it. */
+  creditUsd: number;
+  /** The day of the month the credit renews (the 16th); budget periods run from it. */
+  creditDay: number;
 }
 
 export const DEFAULT_API_CREDITS_SETTINGS: ApiCreditsSettings = {
@@ -90,6 +94,8 @@ export const DEFAULT_API_CREDITS_SETTINGS: ApiCreditsSettings = {
   perTurnBudgetUsd: 15,
   model: 'session',
   workspaceId: '',
+  creditUsd: 200,
+  creditDay: 16,
 };
 
 /** API credits as the owner's browser sees them. */
@@ -99,8 +105,10 @@ export interface ApiCreditsStatus {
   keyState: 'missing' | 'invalid' | 'ok';
   /** The key's last four characters, to tell keys apart. */
   keyHint: string | null;
-  /** Local calendar month ("2026-10") and day ("2026-10-09") the figures below are for. */
+  /** The credit period the figures below are for, by its start date ("2026-10-16"), the date the
+   *  credit next renews, and today ("2026-11-02"). */
   month: string;
+  periodRenews: string;
   day: string;
   monthSpentUsd: number;
   daySpentUsd: number;
