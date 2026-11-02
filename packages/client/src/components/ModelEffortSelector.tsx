@@ -13,7 +13,7 @@ export const MODELS: ModelOption[] = [
   { id: 'claude-fable-5-1',          label: 'Fable 5.1', color: 'text-purple-400' },
   { id: 'claude-opus-5-5',           label: 'Opus 5.5',  color: 'text-orange-300' },
   { id: 'claude-sonnet-5-5',         label: 'Sonnet 5.5', color: 'text-yellow-400' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', color: 'text-green-400'  },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5', color: 'text-green-400'  },
 ];
 
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];

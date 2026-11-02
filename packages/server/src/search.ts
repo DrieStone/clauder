@@ -273,7 +273,7 @@ export async function search(q: string, scope: SearchScope, states: SessionState
   };
 }
 
-const SMART_MODEL = 'claude-haiku-4-5-20251001';
+const SMART_MODEL = 'claude-haiku-5-5';
 
 function extractJsonObject(text: string): any | null {
   const start = text.indexOf('{');

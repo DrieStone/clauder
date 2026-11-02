@@ -278,8 +278,10 @@ with no path to clear it = stuck session.
     picker.** A session persists the model ID it was configured with, so an
     ID dropped from `MODELS` keeps running in every session already pinned to
     it while the UI shows something else. Always: (a) add the new ID to
-    `MODELS` in `ModelEffortSelector.tsx` and to `session.ts`'s two guidance
-    blocks, and if it's the new default, `DEFAULT_MODEL` in both `models.ts`
+    `MODELS` in `ModelEffortSelector.tsx` (the two guidance blocks in `session.ts` are in every
+    session's system prompt, so editing them makes every session re-send its whole conversation once:
+    leave them naming the old ID, which the turn's `--model` maps through `RETIRED_MODELS`, until some
+    other system-prompt change), and if it's the new default, `DEFAULT_MODEL` in both `models.ts`
     and `ModelEffortSelector.tsx`; (b) map **every** ID it replaces to it in
     `RETIRED_MODELS` (`models.ts`) — `ManagedSession.restore` rewrites session
     config, parked tasks, and pinned model-plan steps on load; (c) leave the

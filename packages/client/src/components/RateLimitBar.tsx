@@ -10,6 +10,7 @@ const MODEL_LABELS: Record<string, string> = {
   ...Object.fromEntries(MODELS.map(m => [m.id, m.label])),
   'claude-opus-5': 'Opus 5',
   'claude-sonnet-5': 'Sonnet 5',
+  'claude-haiku-4-5-20251001': 'Haiku 4.5',
 };
 const modelLabel = (id: string) => MODEL_LABELS[id] ?? id.replace(/^claude-/, '');
 

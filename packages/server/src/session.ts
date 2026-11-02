@@ -1013,6 +1013,7 @@ export class ManagedSession {
   }
 
   setModel(model: string): void {
+    model = migrateModelId(model); // a retired ID (the guidance text may still name one) becomes its replacement
     this.config = { ...this.config, model: model || undefined };
     this.broadcast({
       type: 'model_changed',
@@ -1031,7 +1032,7 @@ export class ManagedSession {
   }
 
   private normalizeModel(m: unknown): string {
-    if (typeof m === 'string' && /^claude-/.test(m.trim())) return m.trim();
+    if (typeof m === 'string' && /^claude-/.test(m.trim())) return migrateModelId(m.trim());
     return this.config.model || DEFAULT_MODEL;
   }
 
@@ -1693,7 +1694,7 @@ export class ManagedSession {
       `answer is no. Reply with exactly one word: "yes" or "no". Do NOT use any tools.`;
 
     const flags = [
-      '--model', 'claude-haiku-4-5-20251001',
+      '--model', 'claude-haiku-5-5',
       '--permission-mode', 'plan',
       '--no-session-persistence',
       '--disallowed-tools', 'Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit',
@@ -1880,7 +1881,8 @@ export class ManagedSession {
         // Per-turn override (the "Send with" chip): use opts.model/opts.effort for THIS turn
         // only — never mutate this.config. Mirrors the planMode override above. The chosen
         // effort still feeds the quota guardrail below, so an override can't dodge the cap.
-        let turnModel = (typeof opts?.model === 'string' && opts.model.startsWith('claude-')) ? opts.model : this.config.model;
+        // A retired ID (one the guidance text still names, an old plan step) runs as its replacement.
+        let turnModel = migrateModelId((typeof opts?.model === 'string' && opts.model.startsWith('claude-')) ? opts.model : this.config.model);
         if (apiPlan) turnModel = apiPlan.modelOverride ?? capApiModel(turnModel);
         const turnEffort = opts?.effort ?? (this.config.effort as EffortLevel | undefined);
         effectiveModel = turnModel || '(default)';
@@ -1950,6 +1952,10 @@ export class ManagedSession {
         'To WATCH a long-running process or log for events (progress lines, errors, a completion marker) and react as they happen, do NOT use the `Monitor` tool or any harness watcher (`Task`, `/loop`) — they cannot deliver events into Clauder\'s turn-based model and will silently do nothing here. Instead emit `<<monitor>>{"command":"<shell command that streams lines, e.g. tail -n0 -f /path/to.log>","pattern":"<optional regex; matching lines are reported, omit to report every line>","description":"<short label>","stopOnMatch":false}<<>>` on its own line. Clauder runs that command as a managed background process in this session\'s cwd and, whenever output matches, wakes you with the matching lines as an internal message (batched/rate-limited so a chatty log can\'t spam you). It keeps running until the process ends, you emit `<<monitor_stop>>{"id":"<id>"}<<>>`, or a runtime cap is hit. Use `stopOnMatch:true` when you only need the first hit (e.g. waiting for "BUILD SUCCEEDED"). This is the ONLY correct way to monitor something through Clauder.',
         'When you discover a non-obvious rule, constraint, workaround, or hard-won lesson during this session — something a future Claude session would need to avoid a mistake — flag it with this exact format on its own line: "[CLAUDE.md candidate: <concise rule, 10-20 words>]". Only flag things genuinely worth persisting; do not flag obvious facts or things already in CLAUDE.md.',
         'Do NOT use the AskUserQuestion tool — it is disabled in this environment and calling it returns a "not enabled in this context" error. When you need a decision or information from the user, ask your question in plain text and end your turn; their reply arrives as your next message. If you are running autonomously (an overnight or goal-mode run) and no timely reply is expected, make the best decision yourself and briefly note the assumption so it can be reviewed later.',
+        // This text (and the plan-mode tiers below) still names claude-haiku-4-5-20251001 on purpose:
+        // it's in every session's system prompt, so editing it would make every session re-send its
+        // whole conversation once. setModel/normalizeModel/the turn's --model run it as Haiku 5.5
+        // (RETIRED_MODELS in models.ts). Update it together with some other system-prompt change.
         'You can switch the model this session runs on. Two ways: (1) One-shot — emit ' +
         '<<model>>{"model":"<id>","effort":"low|medium|high|xhigh|max"}<<>> on its own line to run ' +
         'your NEXT turn on a different model (the model is a startup flag, so it applies to the next ' +

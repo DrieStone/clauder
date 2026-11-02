@@ -1,6 +1,6 @@
 import type { UIMessage } from '@clauder/shared';
 
-const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
+const HAIKU_MODEL = 'claude-haiku-5-5';
 
 /** Returns true if newMessage appears to be starting a different task from the recent conversation. */
 export async function classifyTaskSwitch(

@@ -24,7 +24,8 @@ const MODEL_META: Record<string, { label: string; color: string }> = {
   'claude-opus-4-8': { label: 'Opus 4.8', color: 'text-red-300' },
   'claude-sonnet-5-5': { label: 'Sonnet 5.5', color: 'text-sky-300' },
   'claude-sonnet-5': { label: 'Sonnet 5', color: 'text-sky-300' },
-  'claude-haiku-4-5-20251001': { label: 'Haiku 4.5', color: 'text-emerald-300' },
+  'claude-haiku-5-5': { label: 'Haiku 5.5', color: 'text-emerald-300' },
+  'claude-haiku-4-5-20251001': { label: 'Haiku 4.5', color: 'text-emerald-300' }, // legacy: past plans
 };
 const modelMeta = (id: string) => MODEL_META[id] ?? { label: id.replace(/^claude-/, ''), color: 'text-purple-200' };
 

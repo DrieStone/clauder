@@ -16,13 +16,16 @@ const RETIRED_MODELS: Record<string, string> = {
   'claude-sonnet-4-6': 'claude-sonnet-5-5',
   'claude-sonnet-4-5-20250929': 'claude-sonnet-5-5', // deprecated Sep 30, 2026; retires Nov 30, 2026
   'claude-sonnet-4-5': 'claude-sonnet-5-5',          // its alias
+  // Haiku
+  'claude-haiku-4-5-20251001': 'claude-haiku-5-5', // superseded Oct 7, 2026: ~75% cheaper on average
+  'claude-haiku-4-5': 'claude-haiku-5-5',
   // Fable
   'claude-fable-5': 'claude-fable-5-1',
   // Bare aliases. The picker deals only in pinned IDs — an alias silently follows whatever
   // the CLI currently points it at, which is exactly the drift pinning exists to prevent.
   'opus': 'claude-opus-5-5',
   'sonnet': 'claude-sonnet-5-5',
-  'haiku': 'claude-haiku-4-5-20251001',
+  'haiku': 'claude-haiku-5-5',
 };
 
 /** What a session runs when nothing picked a model for it: one created without a model (adopting a

@@ -1400,7 +1400,8 @@ const MODEL_LABELS: Record<string, string> = {
   'claude-opus-5': 'Opus 5',
   'claude-sonnet-5-5': 'Sonnet 5.5',
   'claude-sonnet-5': 'Sonnet 5',
-  'claude-haiku-4-5-20251001': 'Haiku 4.5',
+  'claude-haiku-5-5': 'Haiku 5.5',
+  'claude-haiku-4-5-20251001': 'Haiku 4.5', // legacy: past cost rows
 };
 const modelLabel = (id: string) => MODEL_LABELS[id] ?? id.replace(/^claude-/, '');
 
