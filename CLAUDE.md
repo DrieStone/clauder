@@ -148,7 +148,8 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     and conversation, run with broadcast silenced and the chat, lastActiveAt, status and any wakeup put
     back, so it leaves no trace; already-cold sessions aren't pinged. Never on API credits, never at
     90%+ of the 5-hour window. Saved to `~/.clauder/keep-warm.json`. Pings assume the CLI reuses the
-    cache on a low-effort turn: true on 2.1.286, NOT on 2.1.288+ until #100065 is fixed.
+    cache on a low-effort turn: verified on 2.1.316 (Nov 2) with `test-harness/cli-cache-check.sh`,
+    which resumes a copy of a real conversation the way Clauder does; rerun it before any CLI upgrade.
   - `tags.ts` — `TagManager`: the registry of user-defined colored session tags
     (`{id,label,color}`), persisted to `~/.clauder/tags.json` (atomic write,
     TriggerManager-style). Broadcasts the full snapshot on any CRUD. Sessions
@@ -342,7 +343,7 @@ tail -f ~/.clauder/clauder.log
 - `~/Documents/Clauder Controller/` — separate companion project.
 - `~/Documents/Clauder/` — **stale fork**. Do not edit. Slated for deletion.
 - `~/.clauder/` — runtime state (not in repo).
-- Underlying Claude Code CLI: `@anthropic-ai/claude-code` v2.1.286.
+- Underlying Claude Code CLI: `@anthropic-ai/claude-code` v2.1.316 (pinned exactly in `packages/server/package.json`).
 
 ## Discovered during sessions
 - Headless `--print` mode disables AskUserQuestion and ExitPlanMode and leaves the CLI Monitor tool silently broken, so sessions are steered to Clauder-native substitutes: plain-text questions (answers to already-pending ones arrive as queue-jumping messages, not stdin tool_results), plans detected via the clauder-steps text block, <<schedule_trigger>> + ScheduleWakeup instead of CLI/cron, and the <<monitor>> sentinel (MonitorController). --append-system-prompt reaches only the top-level session, not Task sub-agents, so the parent session must own all scheduling/monitoring.
@@ -362,3 +363,4 @@ tail -f ~/.clauder/clauder.log
 - Client performance: per-message and per-card components use useSessionActions()/useTagRegistry() plus React.memo, because any useSessions() inside re-renders them on every WS message; animate only transform or opacity (a width/margin progress bar forced 60-120 page layouts a second, ~15% of the tab's CPU)
 - Hover-only controls (`opacity-0 group-hover:opacity-100`) are invisible on phones — gate the hiding behind Tailwind's `[@media(hover:hover)]:` variant so touch devices still see them.
 - Popover Escape handlers listen on document and call preventDefault; App.tsx leaves the session on unhandled Escape
+- Phone typing mode hides .kb-hide bars; any text field inside one needs the :focus-within exception or it vanishes on tap
