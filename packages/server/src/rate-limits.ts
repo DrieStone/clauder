@@ -1,5 +1,6 @@
 import type { RateLimitInfo, RateLimitWindow, EffortLevel } from '@clauder/shared';
 import { getCostSummary } from './cost-ledger.js';
+import { getPaceProfile } from './usage-profile.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -214,6 +215,7 @@ export function getRateLimitInfo(): RateLimitInfo {
     weekly: weeklyWindow,
     weeklyOverage: weeklyOverageWindow,
     costSummary: getCostSummary(),
+    paceProfile: getPaceProfile(),
   };
 }
 

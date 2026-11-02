@@ -9,6 +9,7 @@ import { backupSessions } from './persistence.js';
 import { SessionManager } from './session-manager.js';
 import { setupWebSocket } from './ws.js';
 import { onRateLimitUpdate } from './rate-limits.js';
+import { startUsageProfile } from './usage-profile.js';
 import { TriggerManager } from './triggers.js';
 import { TagManager } from './tags.js';
 import { UiStateManager } from './ui-state.js';
@@ -177,6 +178,8 @@ setTimeout(logHealthSnapshot, 60 * 1000).unref(); // first snapshot shortly afte
 // Broadcast rate limit updates to all clients
 onRateLimitUpdate((rateLimit) => {
   broadcast({ type: 'rate_limit_update', rateLimit });
+// The weekly bar's pace line follows when the owner usually works (usage-profile.ts).
+startUsageProfile(() => broadcast({ type: 'rate_limit_update', rateLimit: getRateLimitInfo() }));
   apiCredits?.refresh();
 });
 

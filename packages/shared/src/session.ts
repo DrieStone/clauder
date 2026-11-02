@@ -590,6 +590,9 @@ export interface RateLimitInfo {
   /** Rolling spend-by-model summary (last 24h / 7d) from the cost ledger, for the quota
    *  popover. Absent until the first turn is recorded. See CostSummary. */
   costSummary?: CostSummary | null;
+  /** When the owner usually uses Claude (server usage-profile.ts): the weekly bar's pace line
+   *  follows it instead of a straight line through the week. */
+  paceProfile?: { tz: string; weights: number[]; builtAt: string; calls: number } | null;
 }
 
 /** Cost rolled up by model over a trailing window. Produced by cost-ledger.ts. */

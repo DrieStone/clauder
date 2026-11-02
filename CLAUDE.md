@@ -64,6 +64,14 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
   - `rate-limits.ts` — dual tracking: $-cost proxy (always available) +
     real subscription windows parsed from the CLI's `rate_limit_event`
     (`five_hour` / `seven_day` utilization + `resetsAt`).
+    Since Oct 30, 2026 the owner's plan (Max 20x, renamed **Ultra**) has no 5-hour limit once
+    verified: the CLI sends only the window nearest its limit, so `five_hour` stops arriving and
+    the weekly window (plus a separate Fable weekly limit, shown by the CLI's `/usage`) is the cap.
+  - `usage-profile.ts` (+ `usage-profile-worker.ts`) — when the owner usually uses Claude, for the
+    7-day bar's pace line (client `RateLimitBar.tsx`): 168 hour-of-week weights = weekday share x
+    hour share of the API-price value of every call in the CLI's transcripts (last 42 days), plus a
+    10% even floor. Built in a worker thread (~25 s) at startup if a day old, then daily; saved to
+    `~/.clauder/usage-profile.json`; sent as `RateLimitInfo.paceProfile`.
   - `task-classifier.ts` — out-of-band Haiku call to detect new-task context
     switches (for auto-compact).
   - `client-view.ts` — what the browser gets, as opposed to what the server holds:

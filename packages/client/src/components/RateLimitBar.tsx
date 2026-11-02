@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSessions } from '../context/SessionContext';
-import type { RateLimitWindow, CostSummaryWindow } from '@clauder/shared';
+import type { RateLimitWindow, RateLimitInfo, CostSummaryWindow } from '@clauder/shared';
 import { MODELS } from './ModelEffortSelector';
 import { usePopoverPlacement } from '../lib/popoverPosition';
 
@@ -35,10 +35,38 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 /** Over the even pace by up to this many points is "a little over" (yellow); more is red. */
 const PACE_SLACK = 10;
 
-/** Where usage would be if spread evenly over the window: how much of it has gone by, 0–100.
- *  An hour into the 5-hour window, 20. */
+type PaceProfile = NonNullable<RateLimitInfo['paceProfile']>;
+/** When the owner usually works (server usage-profile.ts), set from the latest usage info on each
+ *  render of RateLimitBar; the 7-day pace line follows it. */
+let paceProfile: PaceProfile | null = null;
+const HOUR_MS = 3600_000;
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const hourFormats = new Map<string, Intl.DateTimeFormat>();
+/** Index into the profile's 168 weights: weekday (Mon=0) * 24 + hour, in the profile's time zone. */
+function hourOfWeek(t: number, tz: string): number {
+  let f = hourFormats.get(tz);
+  if (!f) { f = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric', hourCycle: 'h23' }); hourFormats.set(tz, f); }
+  const parts = Object.fromEntries(f.formatToParts(new Date(t)).map(p => [p.type, p.value]));
+  return Math.max(0, WEEKDAYS.indexOf(parts.weekday)) * 24 + (Number(parts.hour) % 24);
+}
+
+/** Where usage would be by now at the expected pace, 0–100. For the 7-day window with a usage
+ *  profile, the share of a usual week's usage that falls between the window's start and now, so the
+ *  line barely moves overnight and climbs through working hours. Otherwise the share of the window
+ *  gone by (an hour into the 5-hour window, 20). */
 function pacePercent(w: RateLimitWindow, windowMs: number, now = Date.now()): number {
-  const left = new Date(w.resetsAt).getTime() - now;
+  const end = new Date(w.resetsAt).getTime();
+  if (windowMs === SEVEN_DAYS_MS && paceProfile?.weights.length === 168) {
+    let done = 0, total = 0;
+    for (let t = end - windowMs; t < end; t += HOUR_MS) {
+      const wt = paceProfile.weights[hourOfWeek(t, paceProfile.tz)] ?? 0;
+      total += wt;
+      if (t + HOUR_MS <= now) done += wt;
+      else if (t < now) done += wt * (now - t) / HOUR_MS;
+    }
+    if (total > 0) return Math.max(0, Math.min(100, (done / total) * 100));
+  }
+  const left = end - now;
   return Math.max(0, Math.min(100, (1 - left / windowMs) * 100));
 }
 
@@ -180,6 +208,7 @@ export function RateLimitBar() {
   const placement = usePopoverPlacement(containerRef, open, 280);
 
   if (!rateLimit) return null;
+  paceProfile = rateLimit.paceProfile ?? null;
 
   const now = Date.now();
   const live = (w: RateLimitWindow | null | undefined) => (w && new Date(w.resetsAt).getTime() > now ? w : null);
@@ -197,7 +226,9 @@ export function RateLimitBar() {
       weekly ? `7-day window: ${weekly.usedPercent ?? '?'}% used (on pace: ${Math.round(pacePercent(weekly, SEVEN_DAYS_MS))}%), resets ${new Date(weekly.resetsAt).toLocaleString()}` : null,
       overage && overage.usedPercent != null && overage.usedPercent !== weekly?.usedPercent
         ? `7-day incl. overage: ${overage.usedPercent}%` : null,
-      'White line: where you would be if you spread usage evenly. Green: at or under it; yellow: a little over; red: well over.',
+      rateLimit.paceProfile
+        ? 'White line: where you would be at your usual pace (7-day: from when you used Claude over the last 6 weeks, so it barely moves overnight). Green: at or under it; yellow: a little over; red: well over.'
+        : 'White line: where you would be if you spread usage evenly. Green: at or under it; yellow: a little over; red: well over.',
       'Fable, Opus and Sonnet all draw from these same windows — pricier models just consume them faster.',
       'Click for a full breakdown.',
     ].filter(Boolean).join('\n');
