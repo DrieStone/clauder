@@ -10,6 +10,7 @@ import { SessionManager } from './session-manager.js';
 import { setupWebSocket } from './ws.js';
 import { onRateLimitUpdate } from './rate-limits.js';
 import { startUsageProfile } from './usage-profile.js';
+import { startUsagePoll } from './usage-poll.js';
 import { TriggerManager } from './triggers.js';
 import { TagManager } from './tags.js';
 import { UiStateManager } from './ui-state.js';
@@ -180,6 +181,8 @@ onRateLimitUpdate((rateLimit) => {
   broadcast({ type: 'rate_limit_update', rateLimit });
 // The weekly bar's pace line follows when the owner usually works (usage-profile.ts).
 startUsageProfile(() => broadcast({ type: 'rate_limit_update', rateLimit: getRateLimitInfo() }));
+// The weekly windows, Fable's included, from the CLI's /usage every 15 minutes (usage-poll.ts).
+startUsagePoll();
   apiCredits?.refresh();
 });
 

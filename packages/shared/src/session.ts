@@ -587,6 +587,8 @@ export interface RateLimitInfo {
   /** seven_day usage INCLUDING overage (the CLI's `seven_day_overage_included` window).
    *  Only meaningful when overage is enabled on the account; informational otherwise. */
   weeklyOverage?: RateLimitWindow | null;
+  /** The separate weekly limit on Fable (server usage-poll.ts, from the CLI's /usage). */
+  fableWeekly?: RateLimitWindow | null;
   /** Rolling spend-by-model summary (last 24h / 7d) from the cost ledger, for the quota
    *  popover. Absent until the first turn is recorded. See CostSummary. */
   costSummary?: CostSummary | null;

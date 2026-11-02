@@ -215,15 +215,22 @@ export function RateLimitBar() {
   const session = live(rateLimit.session);
   const weekly = live(rateLimit.weekly);
   const overage = live(rateLimit.weeklyOverage);
+  const fable = live(rateLimit.fableWeekly);
+  // Header bars: the 5-hour window on top when there is one (plans with no 5-hour limit, like
+  // Ultra, have none), else the 7-day one; the rest below the countdown, Fable's weekly last.
+  const topBar = session ? { w: session, ms: FIVE_HOURS_MS } : weekly ? { w: weekly, ms: SEVEN_DAYS_MS } : null;
+  const lowerBars = [session ? weekly : null, fable].filter((w): w is RateLimitWindow => !!w);
 
   if (session || weekly) {
     // The countdown belongs to the 5-hour window; the 7-day one stands in only when it's all we have.
     const primary = (session ?? weekly)!;
     const { label: resetLabel, soonMs } = formatCountdown(primary.resetsAt);
     const lines = [
-      session && weekly ? 'Top bar: 5-hour window · middle: time until it resets · bottom bar: 7-day window' : null,
+      session && weekly ? `Top bar: 5-hour window · middle: time until it resets · below: 7-day window${fable ? ', then Fable\'s 7-day limit' : ''}` : null,
+      !session && weekly && fable ? 'Top bar: 7-day window (all models) · middle: time until it resets · bottom bar: Fable\'s own 7-day limit' : null,
       session ? `5-hour window: ${session.usedPercent ?? '?'}% used (on pace: ${Math.round(pacePercent(session, FIVE_HOURS_MS))}%), resets ${new Date(session.resetsAt).toLocaleTimeString()}` : null,
       weekly ? `7-day window: ${weekly.usedPercent ?? '?'}% used (on pace: ${Math.round(pacePercent(weekly, SEVEN_DAYS_MS))}%), resets ${new Date(weekly.resetsAt).toLocaleString()}` : null,
+      fable ? `Fable 7-day limit: ${fable.usedPercent ?? '?'}% used (on pace: ${Math.round(pacePercent(fable, SEVEN_DAYS_MS))}%), resets ${new Date(fable.resetsAt).toLocaleString()}` : null,
       overage && overage.usedPercent != null && overage.usedPercent !== weekly?.usedPercent
         ? `7-day incl. overage: ${overage.usedPercent}%` : null,
       rateLimit.paceProfile
@@ -242,18 +249,20 @@ export function RateLimitBar() {
           aria-label={`Usage limits: ${[
             session ? `5-hour ${session.usedPercent ?? '?'}%` : null,
             weekly ? `7-day ${weekly.usedPercent ?? '?'}%` : null,
+            fable ? `Fable 7-day ${fable.usedPercent ?? '?'}%` : null,
           ].filter(Boolean).join(', ')}, resets in ${resetLabel}`}
         >
-          {session && <HeaderBar w={session} windowMs={FIVE_HOURS_MS} />}
+          {topBar && <HeaderBar w={topBar.w} windowMs={topBar.ms} />}
           <span className={`text-[10px] leading-none font-mono tabular-nums text-center whitespace-nowrap ${countdownClass(primary, session ? FIVE_HOURS_MS : SEVEN_DAYS_MS, soonMs)}`}>
             {resetLabel}
           </span>
-          {weekly && <HeaderBar w={weekly} windowMs={SEVEN_DAYS_MS} />}
+          {lowerBars.map((w, i) => <HeaderBar key={i} w={w} windowMs={SEVEN_DAYS_MS} />)}
         </button>
         {open && (
           <div className="absolute right-0 top-full mt-1 z-50 bg-gray-900 border border-gray-700 rounded p-3 text-xs max-w-[280px] w-[280px] shadow-lg" style={placement ?? undefined}>
             {session && <UsageBar label="5-hour window" w={session} windowMs={FIVE_HOURS_MS} />}
-            {weekly && <UsageBar label="7-day window" w={weekly} windowMs={SEVEN_DAYS_MS} />}
+            {weekly && <UsageBar label={fable ? '7-day window (all models)' : '7-day window'} w={weekly} windowMs={SEVEN_DAYS_MS} />}
+            {fable && <UsageBar label="Fable 7-day limit" w={fable} windowMs={SEVEN_DAYS_MS} />}
             <div className="border-t border-gray-800 my-2" />
             <CostTable title="Last 24h" w={rateLimit.costSummary?.last24h} />
             <CostTable title="Last 7d" w={rateLimit.costSummary?.last7d} />

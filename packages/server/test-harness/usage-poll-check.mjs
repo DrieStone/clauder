@@ -1,0 +1,20 @@
+// Parses the weekly lines of /usage: the real CLI's output now, plus fixed samples. Reads only.
+import { execFileSync } from 'child_process';
+const DIST = new URL('../dist/', import.meta.url).pathname;
+const { parseUsage, parseReset } = await import(DIST + 'usage-poll.js');
+const { CLAUDE_CLI_PATH } = await import(DIST + 'session.js');
+let pass = 0, fail = 0; const ok = (c, l, x) => { if (c) { pass++; console.log('  ✓', l); } else { fail++; console.log('  ✗', l, x !== undefined ? JSON.stringify(x) : ''); } };
+const now = Date.parse('2026-11-02T15:00:00Z');
+ok(parseReset('Nov 3 at 4pm (America/New_York)', now) === '2026-11-03T21:00:00.000Z', '4pm New York in November (EST) is 21:00 UTC', parseReset('Nov 3 at 4pm (America/New_York)', now));
+ok(parseReset('Jul 3 at 4:30pm (America/New_York)', Date.parse('2026-07-01T00:00:00Z')) === '2026-07-03T20:30:00.000Z', 'in summer (EDT) it is 20:30 UTC');
+ok(parseReset('Jan 2 at 9am (America/New_York)', now) === '2027-01-02T14:00:00.000Z', 'a January reset seen in November is next year');
+const sample = 'You are currently using your subscription\n\nCurrent week (all models): 83% used · resets Nov 3 at 4pm (America/New_York)\nCurrent week (Fable): 92% used · resets Nov 3 at 4pm (America/New_York)\n';
+const r = parseUsage(sample, now);
+ok(r.weekly?.usedPercent === 83 && r.weekly.status === 'allowed_warning' && r.fable?.usedPercent === 92 && r.fable.resetsAt === '2026-11-03T21:00:00.000Z', 'both weekly lines', r);
+ok(!parseUsage('Current week (all models): 10% used · resets Nov 3 at 4pm (America/New_York)', now).fable, 'no Fable line, no Fable window');
+const env = { ...process.env }; delete env.CLAUDECODE;
+const live = JSON.parse(execFileSync(CLAUDE_CLI_PATH, ['-p', '/usage', '--output-format', 'json', '--no-session-persistence'], { cwd: '/tmp', env, timeout: 60000 })).result;
+const lr = parseUsage(live);
+console.log('  live /usage →', JSON.stringify(lr));
+ok(!!lr.weekly, 'the real /usage parses');
+console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);

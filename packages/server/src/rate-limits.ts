@@ -22,6 +22,9 @@ let listener: ((info: RateLimitInfo) => void) | null = null;
 let sessionWindow: RateLimitWindow | null = null;
 let weeklyWindow: RateLimitWindow | null = null;
 let weeklyOverageWindow: RateLimitWindow | null = null;
+/** The separate weekly limit on Fable, from the CLI's /usage (usage-poll.ts): the CLI's
+ *  rate_limit_event never carries it. */
+let fableWindow: RateLimitWindow | null = null;
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 // Windows are persisted so a server restart doesn't blank the quota display until the next
@@ -33,13 +36,14 @@ interface PersistedRateLimits {
   session: RateLimitWindow | null;
   weekly: RateLimitWindow | null;
   weeklyOverage: RateLimitWindow | null;
+  fable?: RateLimitWindow | null;
   savedAt: string;
 }
 
 export function saveRateLimits(file = RATE_LIMITS_FILE): void {
   try {
     const data: PersistedRateLimits = {
-      session: sessionWindow, weekly: weeklyWindow, weeklyOverage: weeklyOverageWindow,
+      session: sessionWindow, weekly: weeklyWindow, weeklyOverage: weeklyOverageWindow, fable: fableWindow,
       savedAt: new Date().toISOString(),
     };
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -62,6 +66,7 @@ export function loadRateLimits(file = RATE_LIMITS_FILE): void {
     sessionWindow = fresh(data.session);
     weeklyWindow = fresh(data.weekly);
     weeklyOverageWindow = fresh(data.weeklyOverage);
+    fableWindow = fresh(data.fable);
     if (sessionWindow || weeklyWindow) {
       console.log(`[RateLimit] Restored from disk (saved ${data.savedAt}): five_hour=${sessionWindow?.usedPercent ?? '?'}% seven_day=${weeklyWindow?.usedPercent ?? '?'}%`);
     }
@@ -144,6 +149,21 @@ export function recordSubscriptionLimits(windows: { session?: RateLimitWindow | 
   listener?.(getRateLimitInfo());
 }
 
+/** The weekly windows as read from the CLI's /usage (usage-poll.ts). Fable's is only known this
+ *  way. The all-models week fills in only when no rate_limit_event has (it's the authority, with a
+ *  status); otherwise its percentage is refreshed, which keeps it current while nothing runs. */
+export function recordUsageReading(reading: { weekly?: RateLimitWindow | null; fable?: RateLimitWindow | null }): void {
+  const live = (w: RateLimitWindow | null) => !!w && Date.parse(w.resetsAt) > Date.now();
+  if (reading.fable !== undefined) fableWindow = reading.fable;
+  if (reading.weekly) {
+    weeklyWindow = live(weeklyWindow) && weeklyWindow!.resetsAt === reading.weekly.resetsAt
+      ? { ...weeklyWindow!, usedPercent: reading.weekly.usedPercent }
+      : reading.weekly;
+  }
+  saveRateLimits();
+  listener?.(getRateLimitInfo());
+}
+
 /** When the subscription is out of usage, the time it comes back; null while it isn't. A window
  *  counts only while its reset is still ahead: a "rejected" left over from a window that has since
  *  rolled over means nothing. */
@@ -214,6 +234,7 @@ export function getRateLimitInfo(): RateLimitInfo {
     session: sessionWindow,
     weekly: weeklyWindow,
     weeklyOverage: weeklyOverageWindow,
+    fableWeekly: fableWindow,
     costSummary: getCostSummary(),
     paceProfile: getPaceProfile(),
   };

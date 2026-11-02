@@ -67,6 +67,10 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     Since Oct 30, 2026 the owner's plan (Max 20x, renamed **Ultra**) has no 5-hour limit once
     verified: the CLI sends only the window nearest its limit, so `five_hour` stops arriving and
     the weekly window (plus a separate Fable weekly limit, shown by the CLI's `/usage`) is the cap.
+  - `usage-poll.ts` — runs the CLI's `/usage` (no model call, free) every 15 min and parses its
+    "Current week (all models|Fable): N% used · resets <Mon D at Hpm (tz)>" lines: Fable's weekly
+    limit (`RateLimitInfo.fableWeekly`, the widget's second 7-day bar) is only known this way, and the
+    all-models week stays current while nothing runs (`recordUsageReading`).
   - `usage-profile.ts` (+ `usage-profile-worker.ts`) — when the owner usually uses Claude, for the
     7-day bar's pace line (client `RateLimitBar.tsx`): 168 hour-of-week weights = weekday share x
     hour share of the API-price value of every call in the CLI's transcripts (last 42 days), plus a
