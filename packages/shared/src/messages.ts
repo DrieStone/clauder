@@ -12,7 +12,7 @@ export type WsInboundMessage =
   | { type: 'set_tab_closed'; sessionId: string; closed: boolean }
   | { type: 'set_pin_order'; ids: string[] }
   | { type: 'merge_ui_state'; state: Partial<UiState> }
-  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; files?: FileAttachment[]; planMode?: boolean; model?: string; effort?: string }
+  | { type: 'send_message'; sessionId: string; message: string; images?: ImageAttachment[]; files?: FileAttachment[]; planMode?: boolean; model?: string; effort?: string; /** Start a new conversation with a summary of this one first (SessionManager.sendFresh). */ fresh?: boolean }
   | { type: 'plan_response'; sessionId: string; toolUseId: string; decision: 'accept' | 'reject'; feedback?: string }
   | { type: 'destroy_session'; sessionId: string }
   | { type: 'interrupt_session'; sessionId: string }

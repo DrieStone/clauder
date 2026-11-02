@@ -17,6 +17,7 @@ import { FolderNotes, type NoteSession } from './folder-notes.js';
 import { ProjectNotes } from './project-notes.js';
 import { runClaudeOneShot } from './claude-oneshot.js';
 import { transcriptFor } from './status-reports.js';
+import { transcriptPath } from './cold-resume.js';
 import type { ApiCredits } from './api-credits.js';
 import { subscriptionBlockedUntilMs } from './rate-limits.js';
 import { nameFromMessage, handoffRequest, handoffMessage } from './scratch.js';
@@ -376,6 +377,47 @@ export class SessionManager {
     session.broadcastSkills();
     this.persist();
     return state;
+  }
+
+  /** The owner's "start fresh" on a cold session (client: the cold-resume warning): rather than
+   *  re-send a long conversation whose cache has expired, write a summary of it (one Sonnet
+   *  one-shot on Clauder's copy of the chat), start a new conversation that gets the summary and
+   *  the old conversation's path on its first message, and send `message` there. The chat here is
+   *  left as it is. A working session just gets the message. */
+  async sendFresh(sessionId: string, message: string, images?: ImageAttachment[], opts?: { planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: string }): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    const oldId = session.sdkSessionId;
+    if (session.status === 'working' || !oldId) return this.sendMessage(sessionId, message, images, opts);
+    session.emitSystemMessage('🧊 Starting fresh: writing a short summary of this conversation for Claude…');
+    const state = session.getState();
+    let summary = '';
+    try {
+      const prompt = [
+        `Summarise this conversation (with Claude, in the session "${session.config.name}") so that a fresh Claude session can carry on the work without it.`,
+        'Plain text, under 400 words, with these parts: Goal. Done so far (name the important files). Current state. Decisions and the owner\'s preferences. Open threads and next steps.',
+        'Only state what the conversation shows. No preamble.',
+        '', 'The conversation (oldest first, long ones cut to their latest part):', '', transcriptFor(state.messages),
+      ].join('\n');
+      summary = (await runClaudeOneShot({ prompt, model: 'claude-sonnet-5-5', effort: 'low', cwd: session.config.cwd, timeoutMs: 120_000 })).trim();
+      if (summary.length < 80) summary = '';
+    } catch (err) {
+      console.error(`[SessionManager] Fresh-start summary for ${sessionId} failed:`, err);
+    }
+    if (!summary) {
+      summary = transcriptFor(state.messages.slice(-12)).slice(-4_000);
+    }
+    const file = transcriptPath(session.config.cwd, oldId);
+    session.startFresh([
+      '[Clauder: the owner started this conversation fresh to save usage. The previous one was long and its prompt cache had expired, so resuming it would have re-sent all of it.',
+      'Summary of the previous conversation:',
+      clip(summary, 6_000),
+      `The full previous conversation is saved at ${file} (JSON lines, one message per line). Search or read parts of it when you need a detail the summary doesn't cover, rather than reading it all.]`,
+    ].join('\n\n'));
+    this.persist();
+    session.emitSystemMessage('🧊 Started fresh: Claude has a summary of the conversation so far, and can look up the old one if it needs a detail.');
+    console.log(`[SessionManager] Fresh start for "${session.config.name}" (was ${oldId})`);
+    return this.sendMessage(sessionId, message, images, opts);
   }
 
   async sendMessage(sessionId: string, message: string, images?: ImageAttachment[], opts?: { internal?: boolean; planMode?: boolean; files?: FileAttachment[]; model?: string; effort?: string; author?: MessageAuthor }): Promise<void> {

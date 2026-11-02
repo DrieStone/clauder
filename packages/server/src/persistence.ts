@@ -14,6 +14,8 @@ export interface PersistedSession {
   sdkSessionId: string | null;
   totalCostUsd: number;
   contextUsage: SessionState['contextUsage'];
+  /** Size of the last request (cold-resume.ts); absent in files from before Nov 2026. */
+  promptTokens?: number | null;
   messages: SessionState['messages'];
   permissionMode?: string;
   summary?: string | null;
@@ -124,6 +126,7 @@ export function saveSessions(sessions: SessionStateForPersist[]): void {
     sdkSessionId: s.sdkSessionId,
     totalCostUsd: s.totalCostUsd,
     contextUsage: s.contextUsage,
+    promptTokens: s.promptTokens ?? null,
     messages: trimMessagesForPersist(s.messages),
     permissionMode: s.permissionMode,
     summary: s.summary,

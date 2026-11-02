@@ -799,7 +799,7 @@ function reducer(state: AppState, action: Action): AppState {
 interface SessionContextValue {
   state: AppState;
   createSession: (config: SessionConfig, opts?: { projectFolder?: string }) => void;
-  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string) => void;
+  sendMessage: (sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string, fresh?: boolean) => void;
   respondToPlan: (sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => void;
   refreshSkills: (sessionId: string) => void;
   clearSession: (sessionId: string) => void;
@@ -1260,8 +1260,8 @@ export function SessionProvider({ children, shareToken }: { children: React.Reac
     wsRef.current?.send({ type: 'create_session', config, projectFolder: opts?.projectFolder });
   }, []);
 
-  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string) => {
-    wsRef.current?.send({ type: 'send_message', sessionId, message, images, files, planMode, model, effort });
+  const sendMessage = useCallback((sessionId: string, message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string, fresh?: boolean) => {
+    wsRef.current?.send({ type: 'send_message', sessionId, message, images, files, planMode, model, effort, ...(fresh ? { fresh: true } : {}) });
   }, []);
 
   const respondToPlanFn = useCallback((sessionId: string, toolUseId: string, decision: 'accept' | 'reject', feedback?: string) => {

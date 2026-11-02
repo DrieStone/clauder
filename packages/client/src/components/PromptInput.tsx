@@ -62,7 +62,10 @@ async function downscaleImage(att: ImageAttachment): Promise<ImageAttachment> {
 
 interface PromptInputProps {
   sessionId: string;
-  onSend: (message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string) => void;
+  onSend: (message: string, images?: ImageAttachment[], planMode?: boolean, files?: FileAttachment[], model?: string, effort?: string, fresh?: boolean) => void;
+  /** Asked before a message goes, when sending it would be expensive (SessionView's cold-resume
+   *  warning): send it, start fresh, or keep it in the box. */
+  confirmSend?: () => Promise<'send' | 'fresh' | 'cancel'>;
   onInterrupt: () => void;
   isWorking: boolean;
   draft: string;
@@ -75,7 +78,7 @@ interface PromptInputProps {
 /** Clauder's own commands, listed first in the "/" menu. */
 const TASK_COMMAND: Skill = { name: 'task', description: 'Spin this work off into a new task that runs alongside', source: 'clauder' };
 
-export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, onDraftChange, onTaskCommand }: PromptInputProps) {
+export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, onDraftChange, onTaskCommand, confirmSend }: PromptInputProps) {
   const { updateLastActive, refreshSkills, state, draftAppend } = useSessions();
   const [value, setValue] = useState(draft);
   const prevSessionIdRef = useRef(sessionId);
@@ -183,6 +186,9 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
       setSkillsOpen(false);
       return;
     }
+    // A long conversation gone cold: ask first (Cancel keeps the message in the box).
+    const choice = confirmSend && !trimmed.startsWith('/') ? await confirmSend() : 'send';
+    if (choice === 'cancel') return;
     // Downscale at SEND time (not attach time) so previews always show the original and
     // toggling the option off right before sending still sends full resolution.
     const outImages = downscale && images.length > 0
@@ -196,6 +202,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
       files.length > 0 ? files : undefined,
       undefined, // this dial never overrides the model — see SendMode's doc comment
       overrideEffort,
+      choice === 'fresh',
     );
     setValue('');
     onDraftChange('');
@@ -204,7 +211,7 @@ export function PromptInput({ sessionId, onSend, onInterrupt, isWorking, draft, 
     setDownscale(true);
     setSendMode('default');
     setSkillsOpen(false);
-  }, [value, images, files, downscale, sendMode, onSend, onDraftChange, onTaskCommand]);
+  }, [value, images, files, downscale, sendMode, onSend, onDraftChange, onTaskCommand, confirmSend]);
 
   const insertSkill = useCallback((skill: Skill) => {
     // Replace the leading "/<token>" (and an optional trailing space) with "/<name> "

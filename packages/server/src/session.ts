@@ -13,6 +13,7 @@ import { toClientState } from './client-view.js';
 import { taskRosterPath, writeTaskRoster as writeRosterFile, removeTaskRoster } from './task-roster.js';
 import { MonitorController } from './session-monitors.js';
 import { migrateModelId, DEFAULT_MODEL } from './models.js';
+import { transcriptPath, promptTokensFromTranscript } from './cold-resume.js';
 import type { WsOutboundMessage } from '@clauder/shared';
 import { recordCostDelta, recordSubscriptionLimits, getRateLimitInfo, parseRateLimitEvent, effortCapForQuota, capEffort } from './rate-limits.js';
 import { recordTurnCost } from './cost-ledger.js';
@@ -253,6 +254,12 @@ export class ManagedSession {
   private broadcast: (msg: WsOutboundMessage) => void;
   private needsFork = false;
   private wasReset = false;
+  /** Size of the conversation's last request (input + cache read + cache write): what its next
+   *  message re-sends if the cache has gone cold (cold-resume.ts). */
+  promptTokens: number | null = null;
+  /** After "start fresh" (SessionManager.sendFresh): the summary and old-conversation note that goes
+   *  on the next message, once. */
+  private freshStartNote: string | null = null;
   private awaitingCompactSummary = false;
   compactedContext: string | null = null;
   private retryCount = 0;
@@ -299,6 +306,7 @@ export class ManagedSession {
       sdkSessionId: string | null;
       totalCostUsd: number;
       contextUsage: ContextUsage | null;
+      promptTokens?: number | null;
       messages: UIMessage[];
       permissionMode?: string;
       summary?: string | null;
@@ -341,6 +349,8 @@ export class ManagedSession {
     session.summary = data.summary ?? null;
     session.summaryGeneratedAt = data.summaryGeneratedAt ?? null;
     session.compactedContext = data.compactedContext ?? null;
+    session.promptTokens = data.promptTokens
+      ?? (data.sdkSessionId ? promptTokensFromTranscript(transcriptPath(data.config.cwd, data.sdkSessionId)) : null);
     session.notes = data.notes ?? null;
     session.notesUpdatedAt = data.notesUpdatedAt ?? null;
     // Restore a plan awaiting accept/reject. pendingPlan drives the banner (via the snapshot);
@@ -403,6 +413,7 @@ export class ManagedSession {
       waitingFor: this.waitingFor,
       currentToolActivity: this.currentToolActivity,
       contextUsage: this.contextUsage,
+      promptTokens: this.promptTokens,
       messages: this.messages,
       queuedMessages: [...this.queuedMessages],
       permissionMode: this.permissionMode,
@@ -2152,7 +2163,10 @@ export class ManagedSession {
       const projectNote = opts?.author?.sessionId || opts?.keepWarm || message.trimStart().startsWith('/')
         ? null
         : (this.describeProject?.() ?? null);
-      const prefix = [projectNote, attribution].filter(Boolean).join('\n\n');
+      // Right after "start fresh": the summary of the old conversation, on this one message.
+      const freshNote = !opts?.keepWarm ? this.freshStartNote : null;
+      if (freshNote) this.freshStartNote = null;
+      const prefix = [freshNote, projectNote, attribution].filter(Boolean).join('\n\n');
       const cliMessage = prefix ? `${prefix}\n\n${message}` : message;
 
       // Build stdin message
@@ -2316,6 +2330,13 @@ export class ManagedSession {
           case 'assistant': {
             this.lastActiveAt = new Date().toISOString();
             const assistantMsg = msg as any;
+            {
+              const u = assistantMsg.message?.usage;
+              if (u && !assistantMsg.parent_tool_use_id) {
+                const t = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+                if (t > 0) this.promptTokens = t;
+              }
+            }
             const content = assistantMsg.message?.content;
             if (!content) break;
 
@@ -3296,6 +3317,16 @@ export class ManagedSession {
         console.error(`Error sending background recovery for session ${this.id}:`, err);
       });
     }
+  }
+
+  /** Start a new conversation whose first message carries `note` (a summary of the old one and where
+   *  to find it) instead of the reset priming. The chat here is left as it is. */
+  startFresh(note: string): void {
+    this.reset();
+    this.wasReset = false;
+    this.compactedContext = null;
+    this.promptTokens = null;
+    this.freshStartNote = note;
   }
 
   reset(): void {

@@ -244,6 +244,9 @@ export interface SessionState {
   waitingFor: string | null;
   currentToolActivity: ToolActivity | null;
   contextUsage: ContextUsage | null;
+  /** Size of the last request (input + cache read + cache write): what the next message re-sends
+   *  once the prompt cache has expired. Null until known. */
+  promptTokens?: number | null;
   queuedMessages: QueuedMessage[];
   messages: UIMessage[];
   /** Total messages the server holds. The bulk session list carries only the most recent ones

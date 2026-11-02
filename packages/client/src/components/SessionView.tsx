@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import type { SessionState, Trigger } from '@clauder/shared';
 import { useSessions } from '../context/SessionContext';
 import { MessageList } from './MessageList';
@@ -23,6 +23,7 @@ import { ScratchBar } from './ScratchBar';
 import { KeepWarmButton } from './KeepWarm';
 import { projectIdOf, isTask, tasksByMain, projectActivity } from '../lib/projects';
 import { rememberOpen, sessionToOpen } from '../lib/lastOpen';
+import { coldResumeInfo, ColdResumeDialog, type ColdResumeInfo } from './ColdResume';
 import { inScratch, noteScratchSeen } from '../lib/scratch';
 import { RichMarkdown } from './RichMarkdown';
 
@@ -56,6 +57,21 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
   // whatever effort the previous model was on.
   const effortByModelRef = useRef<Map<string, string>>(new Map());
   const [activeTab, setActiveTabState] = useState<'chat' | 'files' | 'notes' | 'summary' | 'debug'>('chat');
+  // Before a message to a long conversation whose cache has expired: send anyway, or start fresh
+  // with a summary (ColdResume.tsx). Through refs so the callback stays stable.
+  const [coldAsk, setColdAsk] = useState<{ info: ColdResumeInfo; resolve: (c: 'send' | 'fresh' | 'cancel') => void } | null>(null);
+  const coldRef = useRef({ session, keepWarm: state.keepWarm });
+  coldRef.current = { session, keepWarm: state.keepWarm };
+  const confirmSend = useCallback((): Promise<'send' | 'fresh' | 'cancel'> => {
+    const info = coldResumeInfo(coldRef.current.session, coldRef.current.keepWarm);
+    if (!info) return Promise.resolve('send');
+    logEvent('cold_resume_warning', { tokens: info.tokens });
+    return new Promise(resolve => setColdAsk({ info, resolve }));
+  }, [logEvent]);
+  const chooseCold = useCallback((c: 'send' | 'fresh' | 'cancel') => {
+    setColdAsk(ask => { ask?.resolve(c); return null; });
+    logEvent('cold_resume_choice', { choice: c });
+  }, [logEvent]);
   // "Hide tools": the chat shows only the conversation's text, no tool calls. Kept per device.
   const [textOnly, setTextOnly] = useState(() => { try { return localStorage.getItem('clauder.chatTextOnly') === '1'; } catch { return false; } });
   const toggleTextOnly = () => setTextOnly(on => { try { localStorage.setItem('clauder.chatTextOnly', on ? '0' : '1'); } catch { /* storage unavailable */ } return !on; });
@@ -710,12 +726,14 @@ export function SessionView({ session, allSessions, onBack, onSwitchSession, dra
           <PromptInput
             sessionId={session.id}
             onTaskCommand={inScratch(session) ? undefined : (description) => spinOffTask(session.id, description)}
-            onSend={(msg, images, planMode, files, model, effort) => sendMessage(session.id, msg, images, planMode, files, model, effort)}
+            onSend={(msg, images, planMode, files, model, effort, fresh) => sendMessage(session.id, msg, images, planMode, files, model, effort, fresh)}
+            confirmSend={confirmSend}
             onInterrupt={() => interruptSession(session.id)}
             isWorking={isWorking}
             draft={draft}
             onDraftChange={onDraftChange}
           />
+          {coldAsk && <ColdResumeDialog info={coldAsk.info} onChoose={chooseCold} />}
         </>
       ) : activeTab === 'files' ? (
         <FileBrowser cwd={session.config.cwd} />

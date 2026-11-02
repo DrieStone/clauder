@@ -344,7 +344,8 @@ async function handleMessage(
 
     case 'send_message': {
       try {
-        await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode, files: msg.files, model: msg.model, effort: msg.effort });
+        if (msg.fresh) await sessionManager.sendFresh(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode, files: msg.files, model: msg.model, effort: msg.effort });
+        else await sessionManager.sendMessage(msg.sessionId, msg.message, msg.images, { planMode: msg.planMode, files: msg.files, model: msg.model, effort: msg.effort });
       } catch (err: any) {
         broadcast({ type: 'error', sessionId: msg.sessionId, message: err.message });
       }

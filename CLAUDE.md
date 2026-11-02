@@ -150,6 +150,13 @@ launchctl as `com.jsweet.clauder` from `dist/index.js`. A separate copy at
     90%+ of the 5-hour window. Saved to `~/.clauder/keep-warm.json`. Pings assume the CLI reuses the
     cache on a low-effort turn: verified on 2.1.316 (Nov 2) with `test-harness/cli-cache-check.sh`,
     which resumes a copy of a real conversation the way Clauder does; rerun it before any CLI upgrade.
+  - `cold-resume.ts` — the warning before an expensive cold resume. Each session tracks `promptTokens`
+    (its last request's input + cache read + cache write, from the reply's usage; for sessions saved
+    before this, read from the end of the CLI's transcript at restore). The client's `ColdResume.tsx`
+    asks before sending to a session idle 60+ min, not kept warm, at 150k+ tokens: **Send anyway**,
+    **Start fresh with a summary** (`send_message.fresh` → `SessionManager.sendFresh`: a Sonnet one-shot
+    summary, then `startFresh()` begins a new conversation whose first message carries the summary and
+    the old transcript's path), or Cancel (the message stays in the box). Slash commands skip it.
   - `tags.ts` — `TagManager`: the registry of user-defined colored session tags
     (`{id,label,color}`), persisted to `~/.clauder/tags.json` (atomic write,
     TriggerManager-style). Broadcasts the full snapshot on any CRUD. Sessions
