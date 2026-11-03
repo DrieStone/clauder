@@ -1456,8 +1456,15 @@ export class ManagedSession {
       // (`sonnet`, `haiku`) or an agent definition that pins one still wins (CLI ≥2.1.251), and
       // the built-in Explore agent pins "inherit", so it runs on the parent's model, capped at
       // Opus (CLI 2.1.284). CLAUDE_CODE_SUBAGENT_MODEL_FORCE would override all of those, Haiku
-      // picks included. Honors an operator override from the environment.
-      env: { ...process.env, CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL ?? 'claude-sonnet-5-5' },
+      // picks included. Sub-agents also ran at the session's own effort (often max) for reading
+      // work; CLAUDE_CODE_SUBAGENT_EFFORT (CLI 2.1.316+) sets medium when nothing else names one.
+      // A deep review on Nov 3 sent five parallel sub-agents, $30 of a $36 turn. Env only, so no
+      // session's system prompt or cache changes. Honors operator overrides from the environment.
+      env: {
+        ...process.env,
+        CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL ?? 'claude-sonnet-5-5',
+        CLAUDE_CODE_SUBAGENT_EFFORT: process.env.CLAUDE_CODE_SUBAGENT_EFFORT ?? 'medium',
+      },
     });
     // Catch spawn errors (e.g. ENOENT) so they don't crash the process
     proc.on('error', (err) => {
