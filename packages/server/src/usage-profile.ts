@@ -27,6 +27,7 @@ export interface PaceProfile {
 
 let profile: PaceProfile | null = null;
 let building = false;
+let profileStarted = false;
 
 /** The 168 weights from per-weekday and per-hour totals. */
 export function weightsFrom(byDay: number[], byHour: number[]): number[] {
@@ -60,6 +61,8 @@ function build(onDone: () => void): void {
 
 /** Load the saved profile, rebuild it if missing or a day old, then daily. `onChange` re-sends usage info. */
 export function startUsageProfile(onChange: () => void): void {
+  if (profileStarted) return; // only the first call starts it
+  profileStarted = true;
   try {
     const p = JSON.parse(fs.readFileSync(FILE, 'utf8'));
     if (Array.isArray(p?.weights) && p.weights.length === 168) profile = p;

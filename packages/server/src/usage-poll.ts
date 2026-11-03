@@ -57,11 +57,17 @@ export function parseUsage(text: string, now = Date.now()): { weekly?: RateLimit
   return out;
 }
 
+let running = false;
+let started = false;
+
 function poll(): void {
+  if (running) return; // one /usage at a time, however it's called
+  running = true;
   const args = ['-p', '/usage', '--output-format', 'json', '--no-session-persistence'];
   const env = { ...process.env }; delete env.CLAUDECODE;
   execFile(CLI_IS_NATIVE ? CLAUDE_CLI_PATH : process.execPath, CLI_IS_NATIVE ? args : [CLAUDE_CLI_PATH, ...args],
-    { cwd: os.tmpdir(), env, timeout: 60_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    { cwd: os.tmpdir(), env, timeout: 60_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      running = false;
       if (err) { console.error('[UsagePoll] /usage failed:', err.message); return; }
       try {
         const text = String(JSON.parse(stdout).result ?? '');
@@ -75,7 +81,10 @@ function poll(): void {
     });
 }
 
+/** Start polling. Only the first call does anything. */
 export function startUsagePoll(): void {
+  if (started) return;
+  started = true;
   setTimeout(poll, 20_000).unref();
   setInterval(poll, EVERY_MS).unref();
 }

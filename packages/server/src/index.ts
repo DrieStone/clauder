@@ -179,12 +179,15 @@ setTimeout(logHealthSnapshot, 60 * 1000).unref(); // first snapshot shortly afte
 // Broadcast rate limit updates to all clients
 onRateLimitUpdate((rateLimit) => {
   broadcast({ type: 'rate_limit_update', rateLimit });
-// The weekly bar's pace line follows when the owner usually works (usage-profile.ts).
-startUsageProfile(() => broadcast({ type: 'rate_limit_update', rateLimit: getRateLimitInfo() }));
-// The weekly windows, Fable's included, from the CLI's /usage every 15 minutes (usage-poll.ts).
-startUsagePoll();
   apiCredits?.refresh();
 });
+
+// Once, at startup (not inside the listener above, which runs on every usage update: there they
+// started a new poller per update and piled up dozens of /usage processes):
+// the weekly bar's pace line follows when the owner usually works (usage-profile.ts),
+startUsageProfile(() => broadcast({ type: 'rate_limit_update', rateLimit: getRateLimitInfo() }));
+// and the weekly windows, Fable's included, come from the CLI's /usage every 15 minutes (usage-poll.ts).
+startUsagePoll();
 
 // Initialize triggers (fire messages via sessionManager, broadcast events to clients)
 triggerManager = new TriggerManager(
