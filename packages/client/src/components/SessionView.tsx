@@ -1182,6 +1182,19 @@ function SessionSettingsMenu({ session, contextPct, onBack, onShare }: { session
                 {session.config.cwd}
               </div>
             )}
+            <button
+              onClick={() => {
+                logEvent('reveal_in_finder');
+                fetch(`/api/sessions/${session.id}/reveal`, { method: 'POST' })
+                  .then(r => r.ok ? null : r.json().then(j => alert(j.error ?? 'Could not open the folder')))
+                  .catch(() => alert('Could not open the folder'));
+                setOpen(false);
+              }}
+              className="mt-1.5 w-full text-left text-xs px-2 py-1.5 rounded bg-gray-900/60 hover:bg-gray-700 text-gray-300"
+              title="Opens a Finder window on the Mac Clauder runs on"
+            >
+              📂 Open in Finder
+            </button>
           </div>
           <div className="px-1 pb-1">
             <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Permission mode</div>

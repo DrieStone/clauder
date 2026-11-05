@@ -232,6 +232,20 @@ export function createApp(
     res.json(await getGitStatus(session.config.cwd));
   });
 
+  // Open the session's folder in Finder, on this Mac (the ⚙ menu's "Open in Finder"). Only ever the
+  // session's own folder, never a path from the request.
+  app.post('/api/sessions/:id/reveal', (req, res) => {
+    const session = sessionManager.getSession(req.params.id);
+    if (!session) { res.status(404).json({ error: 'Session not found' }); return; }
+    const dir = session.config.cwd;
+    if (!existsSync(dir)) { res.status(404).json({ error: `The folder ${dir} doesn't exist` }); return; }
+    execFile('open', [dir], (err) => {
+      if (err) { res.status(500).json({ error: err.message }); return; }
+      logUsage('reveal_in_finder', { sessionId: session.id });
+      res.json({ ok: true });
+    });
+  });
+
   // --- Claude auth endpoints ---
 
   // Find the Claude CLI path (same walk-up logic as session.ts)
